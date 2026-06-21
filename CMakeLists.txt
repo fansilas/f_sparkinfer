@@ -3,34 +3,31 @@ project(sparkinfer_runtime LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
+# Primary target sm_120 (RTX 5090). Also Ada/Hopper/datacenter-Blackwell.
+set(CMAKE_CUDA_ARCHITECTURES "89;90;100;120" CACHE STRING "CUDA architectures")
 
-# CUDA architecture targets: Blackwell (sm_100), Ada (sm_89), Hopper (sm_90)
-set(CMAKE_CUDA_ARCHITECTURES "89;90;100" CACHE STRING "CUDA architectures")
+option(BUILD_TESTS "Build unit / integration tests" ON)
 
-find_package(CUDA REQUIRED)
-find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 
-option(BUILD_TESTS "Build unit tests" ON)
-option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
+# This repo is the integrator: pull in sparkinfer-kernels and sparkinfer-moe.
+# In a superbuild the targets may already exist; standalone, add the siblings.
+if(NOT TARGET sparkinfer_kernels)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../kernels ${CMAKE_BINARY_DIR}/_kernels)
+endif()
+if(NOT TARGET sparkinfer_moe)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../moe ${CMAKE_BINARY_DIR}/_moe)
+endif()
 
 include_directories(include)
 
-# Core runtime library
-file(GLOB_RECURSE RUNTIME_SRC
-    "src/*.cpp"
-    "csrc/cuda/*.cu"
-)
-
+file(GLOB_RECURSE RUNTIME_SRC "src/*.cpp" "csrc/cuda/*.cu")
 add_library(sparkinfer_runtime SHARED ${RUNTIME_SRC})
 target_include_directories(sparkinfer_runtime PUBLIC include)
+target_link_libraries(sparkinfer_runtime PUBLIC sparkinfer_moe sparkinfer_kernels CUDA::cudart)
 target_compile_options(sparkinfer_runtime PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:
-        -O3
-        --use_fast_math
-        -lineinfo
-        --ptxas-options=-v
-    >
-)
+    $<$<COMPILE_LANGUAGE:CUDA>:-O3;--use_fast_math;-lineinfo>)
+set_target_properties(sparkinfer_runtime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(BUILD_TESTS)
     enable_testing()

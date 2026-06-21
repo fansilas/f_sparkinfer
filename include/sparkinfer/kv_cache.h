@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <cuda_runtime.h>
 
 namespace sparkinfer {
@@ -38,10 +39,14 @@ public:
     // Shape: [num_layers, max_blocks_per_seq]
     int* block_table(uint64_t seq_id) const;
 
-    // Device pointers to K and V storage pools
+    // Device pointers to K and V storage pools (base = layer 0).
+    // Per-layer pointer = (bf16*)k_pool() + layer * layer_stride_elems().
     void* k_pool() const;
     void* v_pool() const;
+    size_t layer_stride_elems() const;   // elements between consecutive layers' sub-pools
 
+    int block_size() const;
+    int max_blocks_per_seq() const;
     int num_free_blocks() const;
     int num_total_blocks() const;
 
