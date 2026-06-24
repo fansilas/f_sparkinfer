@@ -104,6 +104,17 @@
   ],
   "prs": [
     {
+      "num": 11,
+      "title": "runtime/gguf: bound tensor n_dims to GGML_MAX_DIMS before writing dims[]",
+      "areas": [
+        "runtime"
+      ],
+      "label": "none",
+      "tps": 184.58,
+      "delta_pct": null,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/11"
+    },
+    {
       "num": 12,
       "title": "fix(runtime): make GGUF load safe when shared-expert tensors are absent",
       "areas": [
