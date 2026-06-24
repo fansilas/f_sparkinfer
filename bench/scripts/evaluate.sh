@@ -20,7 +20,12 @@ esac; shift; done
 export LLAMACPP_DIR="${LLAMACPP_DIR:-/workspace/.llamacpp}"   # persist llama.cpp across evals
 ARCH="$(detect_arch)"
 
-if [ -n "$REF" ]; then git -C "$ROOT" fetch -q origin "$REF" 2>/dev/null || true; git -C "$ROOT" checkout -q "$REF"; fi
+# Self-test convenience: check out the submitted ref. The bot pre-checks-out the submission and
+# pins bench/scripts to the protected branch, then sets SI_NO_CHECKOUT=1 so this can't restore the
+# submission's (untrusted) copy of the scoring harness over the trusted one.
+if [ -n "$REF" ] && [ -z "${SI_NO_CHECKOUT:-}" ]; then
+  git -C "$ROOT" fetch -q origin "$REF" 2>/dev/null || true; git -C "$ROOT" checkout -q "$REF"
+fi
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 
 echo ">> [1/3] build submission ($COMMIT) from source (sm_$ARCH) ..." >&2

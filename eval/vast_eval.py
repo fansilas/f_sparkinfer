@@ -91,7 +91,11 @@ def main():
                  f"if [ -d /root/sparkinfer/.git ]; then cd /root/sparkinfer && git fetch -q origin && git checkout -q {args.ref} && git pull -q origin {args.ref}; "
                  f"else git clone -q {REPO} /root/sparkinfer && cd /root/sparkinfer && git checkout -q {args.ref}; fi")
         if sh(host, port, setup, timeout=1800).returncode: print(">> setup warnings (continuing)")
-        ev = (f"cd /root/sparkinfer && MODELS_DIR=/workspace/models LLAMACPP_DIR={LLAMACPP_DIR} "
+        # Trust: grade with the harness from the protected default branch, not the submission's copy.
+        # The build still measures the PR's kernels/runtime/moe; only bench/scripts (the scoring code,
+        # incl. label.py + accuracy*) is pinned to origin/main. Fail-closed (&&): no trusted harness -> no eval.
+        ev = (f"cd /root/sparkinfer && git fetch -q origin main && git checkout -q origin/main -- bench/scripts && "
+              f"SI_NO_CHECKOUT=1 MODELS_DIR=/workspace/models LLAMACPP_DIR={LLAMACPP_DIR} "
               f"bench/scripts/evaluate.sh --ref {args.ref} --frontier {args.frontier} --ceiling {args.ceiling}")
         r = sh(host, port, ev, timeout=10800)
         sys.stdout.write(r.stdout[-4000:])
