@@ -104,6 +104,17 @@
   ],
   "prs": [
     {
+      "num": 15,
+      "title": "fix(runtime/qwen35): force n_shared=0 on GGUF loads without shared-expert tensors",
+      "areas": [
+        "runtime"
+      ],
+      "label": "none",
+      "tps": 186.28,
+      "delta_pct": null,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/15"
+    },
+    {
       "num": 17,
       "title": "kernels/quant: reject unsupported GGUF types instead of silently decoding as F32",
       "areas": [
@@ -279,17 +290,6 @@
       "tps": 184.71,
       "delta_pct": null,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/14"
-    },
-    {
-      "num": 15,
-      "title": "fix(runtime/qwen35): force n_shared=0 on GGUF loads without shared-expert tensors",
-      "areas": [
-        "runtime"
-      ],
-      "label": "none",
-      "tps": 0.0,
-      "delta_pct": null,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/15"
     },
     {
       "num": 8,
