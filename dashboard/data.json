@@ -104,6 +104,17 @@
   ],
   "prs": [
     {
+      "num": 20,
+      "title": "fix(runtime): reject unsupported GGML types during GGUF load",
+      "areas": [
+        "runtime"
+      ],
+      "label": "none",
+      "tps": 186.35,
+      "delta_pct": null,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/20"
+    },
+    {
       "num": 21,
       "title": "fix(runtime): guard DecodeRunner batch size against scratch overflow",
       "areas": [
