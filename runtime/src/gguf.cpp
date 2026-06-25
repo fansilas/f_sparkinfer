@@ -97,6 +97,11 @@ bool GGUF::open(const std::string& path) {
     if (!c.ok) { fprintf(stderr, "[gguf] metadata parse error\n"); return false; }
 
     long alignment = ints_.count("general.alignment") ? ints_["general.alignment"] : 32;
+    // general.alignment is file-controlled; it must be a positive power of two (the
+    // spec default is 32). A present-but-zero value would divide-by-zero (SIGFPE) when
+    // computing data_start below, and a negative value would mis-align it. Clamp any
+    // invalid alignment back to the default instead of trusting it.
+    if (alignment <= 0) alignment = 32;
 
     // tensor infos
     struct Info { std::string name; GGUFTensor t; uint64_t offset; };
