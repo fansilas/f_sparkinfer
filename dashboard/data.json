@@ -82,6 +82,20 @@
   ],
   "prs": [
     {
+      "num": 76,
+      "title": "perf(attn): fuse per-head Q/K-norm and Q/K rope into single kernels (+4.1% decode)",
+      "areas": [
+        "kernels",
+        "runtime"
+      ],
+      "label": "none",
+      "tps": 345.47,
+      "delta_pct": -0.7,
+      "top1": 0.98,
+      "kl": 0.158,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/76"
+    },
+    {
       "num": 67,
       "title": "perf(moe): mmvq down split-K occupancy for M-tier decode",
       "areas": [
