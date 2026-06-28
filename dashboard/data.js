@@ -83,6 +83,19 @@ window.SPARKINFER = {
   ],
   "prs": [
     {
+      "num": 73,
+      "title": "perf(moe): skip the unused per-expert token count in single-token decode (+6% decode)",
+      "areas": [
+        "runtime"
+      ],
+      "label": "S",
+      "tps": 371.29,
+      "delta_pct": 4.4,
+      "top1": 0.95,
+      "kl": 0.1415,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/73"
+    },
+    {
       "num": 72,
       "title": "perf(gemm): split-K the router projection GEMV for decode occupancy (+3% decode)",
       "areas": [
@@ -148,19 +161,6 @@ window.SPARKINFER = {
       "top1": 0.95,
       "kl": 0.1415,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/74"
-    },
-    {
-      "num": 73,
-      "title": "perf(moe): skip the unused per-expert token count in single-token decode (+6% decode)",
-      "areas": [
-        "runtime"
-      ],
-      "label": "S",
-      "tps": 336.31,
-      "delta_pct": 4.9,
-      "top1": 0.97,
-      "kl": 0.1507,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/73"
     },
     {
       "num": 71,
