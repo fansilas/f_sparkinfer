@@ -83,32 +83,6 @@ window.SPARKINFER = {
   ],
   "prs": [
     {
-      "num": 73,
-      "title": "perf(moe): skip the unused per-expert token count in single-token decode (+6% decode)",
-      "areas": [
-        "runtime"
-      ],
-      "label": "M",
-      "tps": 388.66,
-      "delta_pct": 9.3,
-      "top1": 0.98,
-      "kl": 0.1453,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/73"
-    },
-    {
-      "num": 72,
-      "title": "perf(gemm): split-K the router projection GEMV for decode occupancy (+3% decode)",
-      "areas": [
-        "kernels"
-      ],
-      "label": "M",
-      "tps": 384.11,
-      "delta_pct": 8.0,
-      "top1": 0.97,
-      "kl": 0.1417,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/72"
-    },
-    {
       "num": 76,
       "title": "perf(attn): fuse per-head Q/K-norm and Q/K rope into single kernels (+4.1% decode)",
       "areas": [
@@ -121,6 +95,32 @@ window.SPARKINFER = {
       "top1": 0.98,
       "kl": 0.1453,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/76"
+    },
+    {
+      "num": 73,
+      "title": "perf(moe): skip the unused per-expert token count in single-token decode (+6% decode)",
+      "areas": [
+        "runtime"
+      ],
+      "label": "S",
+      "tps": 371.29,
+      "delta_pct": 4.4,
+      "top1": 0.95,
+      "kl": 0.1415,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/73"
+    },
+    {
+      "num": 72,
+      "title": "perf(gemm): split-K the router projection GEMV for decode occupancy (+3% decode)",
+      "areas": [
+        "kernels"
+      ],
+      "label": "XS",
+      "tps": 367.61,
+      "delta_pct": 3.4,
+      "top1": 0.99,
+      "kl": 0.1417,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/72"
     },
     {
       "num": 67,
