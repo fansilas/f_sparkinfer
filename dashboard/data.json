@@ -83,6 +83,21 @@
   ],
   "prs": [
     {
+      "num": 86,
+      "title": "perf(decode): single-pass MoE top-k + fused RoPE/KV-append (+3.2% decode)",
+      "areas": [
+        "kernels",
+        "runtime"
+      ],
+      "label": "S",
+      "tps": 454.41,
+      "delta_pct": 4.2,
+      "top1": 0.97,
+      "kl": 0.1417,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/86",
+      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0086-4e45ed9"
+    },
+    {
       "num": 89,
       "title": "perf(decode): run Q/K/V projections on concurrent CUDA streams (+5.7% decode)",
       "areas": [
@@ -109,21 +124,6 @@
       "kl": 0.1417,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/51",
       "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0051-d7824bf"
-    },
-    {
-      "num": 86,
-      "title": "perf(decode): single-pass MoE top-k + fused RoPE/KV-append (+3.2% decode)",
-      "areas": [
-        "kernels",
-        "runtime"
-      ],
-      "label": "REJECT",
-      "tps": 0,
-      "delta_pct": null,
-      "top1": 0,
-      "kl": 99,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/86",
-      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0086-0f483c0"
     },
     {
       "num": 87,
