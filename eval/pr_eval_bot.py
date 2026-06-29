@@ -412,17 +412,19 @@ def record_merge(repo, num):
     if any(m.get("pr") == num for m in data.get("landed", [])): return       # already recorded
     e = next((p for p in data.get("prs", []) if p.get("num") == num), None)
     if not e or e.get("label") not in SPEEDUP_LABELS: return                 # only verified speedups
-    # The journey is in measured tok/s (each step is the merged PR's actual decode rate). Use the
-    # PR's measured tps; max() keeps the headline monotonic if a box happened to be slower. (Scoring
-    # is still hardware-independent — it's the same-box delta — this is just the achieved-number display.)
-    raw = round(e.get("tps") or 0, 2)
-    new_f = max(round(data["status"].get("frontier_tps") or 0, 2), raw)
+    # Advance by the VERIFIED SAME-BOX RELATIVE GAIN (delta_pct), NOT the raw measured tps. Raw tok/s
+    # zig-zags ±2% with whichever box ran (hot vs cool) and breaks the journey's monotonicity; applying
+    # the same-box gain to the displayed frontier keeps the headline hardware-independent and the journey
+    # a clean calibrated ladder. Falls back to raw max() only if the gain wasn't recorded.
+    old_f = round(data["status"].get("frontier_tps") or 0, 2)
+    gain = (e.get("delta_pct") or 0) / 100.0
+    new_f = round(old_f * (1 + gain), 2) if gain > 0 else max(old_f, round(e.get("tps") or 0, 2))
     data["status"]["frontier_tps"] = new_f
     if e.get("top1") is not None: data["status"]["token_match"] = round(e["top1"], 4)
     if e.get("kl") is not None:   data["status"]["kl"] = round(e["kl"], 4)
     short = re.sub(r"^\w+(\([^)]*\))?:\s*", "", e.get("title", ""))[:28]      # strip "area(x): " prefix
     landed = [m for m in data.get("landed", []) if m.get("pr") != num]
-    landed.append({"name": short or f"PR #{num}", "tps": raw, "pr": num,
+    landed.append({"name": short or f"PR #{num}", "tps": new_f, "pr": num,
                    "date": datetime.date.today().isoformat()})
     data["landed"] = sorted(landed, key=lambda m: m["tps"])
     data["updated"] = datetime.date.today().isoformat()
