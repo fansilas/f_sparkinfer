@@ -6,6 +6,8 @@
 
 Qwen3-30B-A3B (Q4_K_M GGUF) runs end-to-end on an RTX PRO 6000 (sm_120), decode optimized **0.60 → 134 tok/s (≈220×)** across 6 source-verifiable passes, output verified correct, **21.7 GB** resident (experts kept quantized). Independently verified on an **RTX 5090** (CUDA 13): community optimizations have ratcheted the decode frontier to **388.68 tok/s** — **past llama.cpp (+4.5% at 128-tok decode, ~parity at long context)**, the first kernel-level decode win over llama.cpp on this model (same GGUF, same Q4_K_M precision, same greedy bs=1 decode — no speculative decoding or attention shortcut) — at **98% top-1 token agreement** with llama.cpp (KL ≈ 0.145 nats). Each PR is built and benchmarked against `main` on the *same* RTX 5090 so the score is hardware-independent. See the live [dashboard](https://gittensor-ai-lab.github.io/sparkinfer/dashboard/), [accuracy](bench/results/accuracy_qwen3-30b-a3b_q4km.md), and [RTX 5090](bench/results/qwen3-30b-a3b_q4km_rtx5090.md) results.
 
+> **Strategy:** we deliberately focus on one model — Qwen3-30B-A3B — to maximize decode speed before broadening, and every optimization must pass a strict accuracy gate (top-1 / KL vs llama.cpp) so speed never costs correctness.
+
 ## Why a custom engine
 
 The datacenter engines (vLLM, SGLang, TensorRT-LLM) optimize **throughput** for multi-user serving and are *retrofitting* consumer Blackwell (`sm_120/121`); llama.cpp is the portable foundation but specializes for no architecture. sparkinfer targets the gap they leave — single-stream (`bs=1`) latency for **on-device agents**, not datacenter batch throughput:
