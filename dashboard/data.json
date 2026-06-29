@@ -3,7 +3,7 @@
   "status": {
     "gpu": "RTX 5090 · sm_120 · CUDA 13",
     "model": "Qwen3-30B-A3B · Q4_K_M",
-    "frontier_tps": 410.85,
+    "frontier_tps": 443.38,
     "ref_name": "llama.cpp",
     "ref_tps": 366,
     "vram_gb": 21.4,
@@ -83,6 +83,49 @@
   ],
   "prs": [
     {
+      "num": 89,
+      "title": "perf(decode): run Q/K/V projections on concurrent CUDA streams (+5.7% decode)",
+      "areas": [
+        "runtime"
+      ],
+      "label": "S",
+      "tps": 443.38,
+      "delta_pct": 5.7,
+      "top1": 0.97,
+      "kl": 0.1417,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/89",
+      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0089-4e13546"
+    },
+    {
+      "num": 51,
+      "title": "runtime: prompt-lookup speculative decoding for bs=1 MoE decode",
+      "areas": [
+        "runtime"
+      ],
+      "label": "none",
+      "tps": 419.68,
+      "delta_pct": 0.0,
+      "top1": 0.97,
+      "kl": 0.1417,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/51",
+      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0051-d7824bf"
+    },
+    {
+      "num": 86,
+      "title": "perf(decode): single-pass MoE top-k + fused RoPE/KV-append (+3.2% decode)",
+      "areas": [
+        "kernels",
+        "runtime"
+      ],
+      "label": "REJECT",
+      "tps": 0,
+      "delta_pct": null,
+      "top1": 0,
+      "kl": 99,
+      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/86",
+      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0086-0f483c0"
+    },
+    {
       "num": 87,
       "title": "perf(attn): fuse Q/K/V Q4_K MMVQ into one launch (+3% decode)",
       "areas": [
@@ -96,21 +139,6 @@
       "kl": 0.1417,
       "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/87",
       "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0087-0fb1fe1"
-    },
-    {
-      "num": 86,
-      "title": "perf(decode): single-pass MoE top-k + fused RoPE/KV-append (+3.2% decode)",
-      "areas": [
-        "kernels",
-        "runtime"
-      ],
-      "label": "S",
-      "tps": 408.23,
-      "delta_pct": 3.6,
-      "top1": 0.97,
-      "kl": 0.1417,
-      "url": "https://github.com/gittensor-ai-lab/sparkinfer/pull/86",
-      "proof_url": "https://gittensor-ai-lab.github.io/sparkinfer-log/?run=0086-1fafcc2"
     },
     {
       "num": 83,
@@ -674,6 +702,12 @@
       "name": "emit Q8_1 from the residual ",
       "tps": 410.85,
       "pr": 83,
+      "date": "2026-06-29"
+    },
+    {
+      "name": "run Q/K/V projections on con",
+      "tps": 443.38,
+      "pr": 89,
       "date": "2026-06-29"
     }
   ]

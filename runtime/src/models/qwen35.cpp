@@ -56,6 +56,8 @@ struct Qwen35Model::Impl {
     moe::MoEEngine* engine;
     Qwen35Weights w;
     cudaStream_t stream{};
+    cudaStream_t stream_k{}, stream_v{};         // side streams for concurrent K/V projection
+    cudaEvent_t ev_qkv{}, ev_k{}, ev_v{};        // fork/join events (captured into the decode graph)
     uint64_t seq_id = 0;
     int qdim, kvdim;
     bool gguf = false;   // true after load_gguf: dense weights are native [out,in], use GEMV
@@ -82,6 +84,7 @@ struct Qwen35Model::Impl {
     void* aq81 = nullptr; // block_q8_1 activation for the faithful llama mmvq port
     bool use_llama = true; // default ON: faithful llama mmvq for Q4_K attn GEMVs (+9.7%, top1 0.99). =0 disables
     bool use_q6mmvq = true;  // default ON: int8 Q6_K mmvq for attn-V upgrades + LM head. =0 disables
+    bool use_qkvstream = true; // default ON: run Q/K/V projections on concurrent streams. =0 disables
     bool use_qkfuse = true;// default ON: fused per-head Q-norm + K-norm (1 kernel). =0 disables
     bool use_ropekv = true;// default ON: fused RoPE + KV-append (1 kernel vs 2). =0 disables
     bool use_fnq = true;   // default ON: post-MoE add_rmsnorm2 also emits Q8_1(xn), deleting the
@@ -105,6 +108,10 @@ Qwen35Model::Qwen35Model(const Qwen35Config& cfg, KVCacheManager* kv, moe::MoEEn
     p_->qdim = cfg.n_q_heads * cfg.head_dim;
     p_->kvdim = cfg.n_kv_heads * cfg.head_dim;
     cudaStreamCreate(&p_->stream);
+    cudaStreamCreate(&p_->stream_k); cudaStreamCreate(&p_->stream_v);
+    cudaEventCreateWithFlags(&p_->ev_qkv, cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&p_->ev_k, cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&p_->ev_v, cudaEventDisableTiming);
     const int H = cfg.hidden;
     p_->x=p_->alloc<bf16>(H); p_->xn=p_->alloc<bf16>(H);
     p_->q=p_->alloc<bf16>(p_->qdim); p_->k=p_->alloc<bf16>(p_->kvdim); p_->v=p_->alloc<bf16>(p_->kvdim);
@@ -142,6 +149,7 @@ Qwen35Model::Qwen35Model(const Qwen35Config& cfg, KVCacheManager* kv, moe::MoEEn
     if (const char* e = getenv("SPARKINFER_QKFUSE")) p_->use_qkfuse = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_ROPEKV")) p_->use_ropekv = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_FNQ"))    p_->use_fnq   = !(e[0] == '0');
+    if (const char* e = getenv("SPARKINFER_QKVSTREAM")) p_->use_qkvstream = !(e[0] == '0');
 }
 
 Qwen35Model::~Qwen35Model() {
@@ -156,6 +164,8 @@ Qwen35Model::~Qwen35Model() {
     cudaFree(p_->fa_m); cudaFree(p_->fa_l); cudaFree(p_->fa_acc);
     cudaFree(p_->aq8); cudaFree(p_->aq8_d); cudaFree(p_->aq8_s); cudaFree(p_->aq81);
     if (p_->graph_ready) { cudaGraphExecDestroy(p_->cu_exec); cudaGraphDestroy(p_->cu_graph); }
+    cudaEventDestroy(p_->ev_qkv); cudaEventDestroy(p_->ev_k); cudaEventDestroy(p_->ev_v);
+    cudaStreamDestroy(p_->stream_v); cudaStreamDestroy(p_->stream_k);
     cudaStreamDestroy(p_->stream);
     delete p_;
 }
@@ -219,20 +229,36 @@ int Qwen35Model::forward_token(int token_id, int position) {
                 kernels::launch_quantize_q8_1_blocks(s.xn, s.aq81, H, st);   // shared Q8_1(xn) for Q4_K + Q6_K mmvq
             else if (s.use_pq && any_q4k)
                 kernels::launch_quantize_q8_1(s.xn, s.aq8, s.aq8_d, s.aq8_s, H, st);
-            auto proj = [&](const void* W, int t, void* y, int N) {
+            auto proj = [&](const void* W, int t, void* y, int N, cudaStream_t pst) {
                 if (s.use_pq && t == 12) {
-                    if (s.use_llama) kernels::launch_mmvq_q4k(s.aq81, W, y, N, H, st);
-                    else             kernels::launch_gemv_q_dp4a_pq(s.aq8, s.aq8_d, s.aq8_s, W, y, N, H, st);
+                    if (s.use_llama) kernels::launch_mmvq_q4k(s.aq81, W, y, N, H, pst);
+                    else             kernels::launch_gemv_q_dp4a_pq(s.aq8, s.aq8_d, s.aq8_s, W, y, N, H, pst);
                 }
                 else if (s.use_q6mmvq && t == 14)
-                    kernels::launch_mmvq_q6k(s.aq81, W, y, N, H, st);        // Q6_K mmvq (attn-V upgrades); reuses aq81
+                    kernels::launch_mmvq_q6k(s.aq81, W, y, N, H, pst);       // Q6_K mmvq (attn-V upgrades); reuses aq81
 
-                else if (t) kernels::launch_gemv_q(s.xn, W, t, y, N, H, st);
-                else        kernels::launch_gemv(s.xn, W, y, N, H, st);
+                else if (t) kernels::launch_gemv_q(s.xn, W, t, y, N, H, pst);
+                else        kernels::launch_gemv(s.xn, W, y, N, H, pst);
             };
-            proj(w.wq, w.wq_type, s.q, s.qdim);
-            proj(w.wk, w.wk_type, s.k, s.kvdim);
-            proj(w.wv, w.wv_type, s.v, s.kvdim);
+            if (s.use_qkvstream) {
+                // Each Q/K/V GEMV under-occupies the GPU at bs=1 (latency-bound); run them
+                // concurrently on 3 streams so their memory traffic overlaps. Fork after the
+                // shared activation quantize, join before QK-norm. Captured into the decode graph.
+                cudaEventRecord(s.ev_qkv, st);
+                cudaStreamWaitEvent(s.stream_k, s.ev_qkv, 0);
+                cudaStreamWaitEvent(s.stream_v, s.ev_qkv, 0);
+                proj(w.wq, w.wq_type, s.q, s.qdim, st);
+                proj(w.wk, w.wk_type, s.k, s.kvdim, s.stream_k);
+                proj(w.wv, w.wv_type, s.v, s.kvdim, s.stream_v);
+                cudaEventRecord(s.ev_k, s.stream_k);
+                cudaEventRecord(s.ev_v, s.stream_v);
+                cudaStreamWaitEvent(st, s.ev_k, 0);
+                cudaStreamWaitEvent(st, s.ev_v, 0);
+            } else {
+                proj(w.wq, w.wq_type, s.q, s.qdim, st);
+                proj(w.wk, w.wk_type, s.k, s.kvdim, st);
+                proj(w.wv, w.wv_type, s.v, s.kvdim, st);
+            }
         } else {
             kernels::launch_gemm(s.xn, w.wq, s.q, 1, s.qdim,  H, 1.f, 0.f, gc, st);
             kernels::launch_gemm(s.xn, w.wk, s.k, 1, s.kvdim, H, 1.f, 0.f, gc, st);
