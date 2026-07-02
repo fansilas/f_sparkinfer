@@ -12,6 +12,32 @@ window.SPARKINFER = {
     "kl": 0.0175,
     "ref_note": "128-tok decode, same RTX 5090 final main benchmark · seed 99162999bbd8efa5"
   },
+  "context_baselines": [
+    {
+      "ctx": 512,
+      "label": "512",
+      "color": "#7B5DFF",
+      "tokens": 128,
+      "sparkinfer_tps": 402.39,
+      "llamacpp_tg128_tps": 362.76
+    },
+    {
+      "ctx": 4096,
+      "label": "4k",
+      "color": "#0E8A16",
+      "tokens": 128,
+      "sparkinfer_tps": 193.83,
+      "llamacpp_tg128_tps": 362.62
+    },
+    {
+      "ctx": 16384,
+      "label": "16k",
+      "color": "#B8860B",
+      "tokens": 128,
+      "sparkinfer_tps": 167.89,
+      "llamacpp_tg128_tps": 362.61
+    }
+  ],
   "passes_gpu": "RTX 5090",
   "passes": [
     {
