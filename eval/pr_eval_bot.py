@@ -68,6 +68,7 @@ NEEDS_REBASE_LABEL = "needs-rebase"   # also a verified speedup, but not the rou
 REEVALUATE_LABEL   = "re-evaluate"    # winner merged → rebase onto new main; bot re-evals on push
 HOLD_LABEL         = "hold"           # maintainer override: never auto-merge this PR
 CONTEXT_LABELS     = {"128-context", "512-context", "4k-context", "16k-context"}
+REGRESSION_LABELS  = {"regression-128", "regression-512", "regression-4k", "regression-16k"}
 
 # Auto-merge the round's merge-first winner — OFF unless SPARKINFER_AUTOMERGE=1. Heavily guarded:
 # the eval only verifies speed + token-match, so auto-merge is gated on labels, author standing,
@@ -75,7 +76,7 @@ CONTEXT_LABELS     = {"128-context", "512-context", "4k-context", "16k-context"}
 AUTO_MERGE_FIRST = os.environ.get("SPARKINFER_AUTOMERGE", "0") == "1"
 # Auto-merge is BLOCKED if the PR carries any of these labels:
 AUTOMERGE_BLOCK_LABELS = {"copycat", "flagged:gaming", "penalty", "needs-benchmark", "not-tested",
-                          NEEDS_REBASE_LABEL, REEVALUATE_LABEL, HOLD_LABEL}
+                          NEEDS_REBASE_LABEL, REEVALUATE_LABEL, HOLD_LABEL, *REGRESSION_LABELS}
 # ...or touches any maintainer-owned / governance path (contributor speedups live in kernels|runtime|moe):
 AUTOMERGE_SENSITIVE = ("eval/", "bench/scripts/", ".gittensor/", ".github/", "dashboard/", "CODEOWNERS")
 
@@ -296,6 +297,13 @@ def apply_context_label(repo, num, cur, label):
     if label not in cur:
         add_label(repo, num, label)
 
+def apply_regression_labels(repo, num, cur, labels):
+    want = {l for l in (labels or []) if l in REGRESSION_LABELS}
+    for lab in (cur & REGRESSION_LABELS) - want:
+        remove_label(repo, num, lab)
+    for lab in want - cur:
+        add_label(repo, num, lab)
+
 def render(res, oid):
     label = res.get("label", "?")
     icon = {"REJECT": "❌", "none": "⚪", "BASELINE": "📊"}.get(label, "✅")
@@ -332,6 +340,8 @@ def render(res, oid):
                     f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
     if res.get("ctx_32768_tps") is not None:
         rows.append(f"| 32k telemetry | {res.get('ctx_32768_tps')} tok/s |")
+    if res.get("regression_labels"):
+        rows.append(f"| regressions | {', '.join(res.get('regression_labels') or [])} |")
     if "frontier_tps" in res and res["frontier_tps"]:
         # Label it "prior frontier" when this PR superseded it, so the old value isn't mistaken
         # for the current live frontier (which is now this PR's tps).
@@ -344,6 +354,8 @@ def render(res, oid):
             "BASELINE": "No frontier was set; this run establishes it."
             }.get(label, f"Verified speedup — **sets the new frontier to {res.get('tps')} tok/s** "
                          f"(was {res.get('frontier_tps','?')}).")
+    if label == "REJECT" and res.get("auto_close"):
+        note = "No context cleared the 2% significance gate while at least one context regressed. Auto-closing this PR."
     target_note = ("128/512/4k/16k guarded · strongest context scores"
                    if res.get("eval_mode") == "longctx" else "128-token decode frontier")
     return (f"<!-- sparkinfer-eval:{oid} -->\n"
@@ -405,6 +417,8 @@ def upload_eval_log(repo, num, title, oid, res, log_text, baseline):
                   "eval_mode": res.get("eval_mode"), "score_context": res.get("score_context"),
                   "best_context_label": res.get("best_context_label"),
                   "context_gains_pct": res.get("context_gains_pct"),
+                  "regression_labels": res.get("regression_labels"),
+                  "auto_close": res.get("auto_close"),
                   "ctx_128_tps": res.get("ctx_128_tps"), "ctx_512_tps": res.get("ctx_512_tps"),
                   "ctx_2048_tps": res.get("ctx_2048_tps"),
                   "ctx_4096_tps": res.get("ctx_4096_tps"),
@@ -464,6 +478,7 @@ def update_dashboard(repo, pr, areas, res, proof_url=None):
              "top1": res.get("top1"), "kl": res.get("kl"),
              "url": f"https://github.com/{repo}/pull/{num}"}
     for k in ("eval_mode", "score_context", "best_context_label", "context_gains_pct",
+              "regression_labels", "auto_close",
               "ctx_128_tps", "ctx_512_tps", "ctx_2048_tps", "ctx_4096_tps",
               "ctx_16384_tps", "ctx_32768_tps",
               "guard_128_baseline", "guard_128_ratio", "guard_128_pass",
@@ -910,6 +925,7 @@ def main():
                 remove_label(args.repo, num, lab)
             add_label(args.repo, num, f"eval:{label}")
             apply_context_label(args.repo, num, cur, res.get("best_context_label"))
+            apply_regression_labels(args.repo, num, cur, res.get("regression_labels"))
             # This was just graded against the CURRENT main, so it's no longer stale: clear
             # needs-rebase. If it carried needs-rebase, it was a post-rebase re-eval → tag re-evaluate.
             if NEEDS_REBASE_LABEL in cur:
@@ -920,6 +936,10 @@ def main():
         if res:
             proof = upload_eval_log(args.repo, num, pr.get("title", ""), oid, res, r.stdout + r.stderr, run_baseline)
             update_dashboard(args.repo, pr, areas, res, proof_url=proof)
+            if res.get("auto_close"):
+                gh(["pr", "close", str(num), "-R", args.repo,
+                    "--comment", "Auto-closed by sparkinfer eval: no single context cleared the 2% improvement gate and at least one context regressed."])
+                print(f"PR #{num}: auto-closed after regression-only eval reject.")
         # NB: run_baseline is NOT ratcheted here — every PR is graded against merged origin/main, so
         # independent optimizations each get their true gain (the frontier advances on MERGE, not eval).
 

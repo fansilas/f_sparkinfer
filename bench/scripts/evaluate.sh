@@ -207,13 +207,32 @@ import json, os
 print(json.loads(os.environ["SCORE_SELECT"])["chosen"]["llama"])
 PY
 )"
+  SELECTED_GAIN="$(SCORE_SELECT="$SCORE_SELECT" python3 - <<'PY'
+import json, os
+print(json.loads(os.environ["SCORE_SELECT"])["chosen"]["gain"])
+PY
+)"
   CONTEXT_GAINS_JSON="$(SCORE_SELECT="$SCORE_SELECT" python3 - <<'PY'
 import json, os
 print(json.dumps({c["label"]: round(100*c["gain"], 2) for c in json.loads(os.environ["SCORE_SELECT"])["contexts"]}, separators=(",", ":")))
 PY
 )"
+  REGRESSION_LABELS_JSON="$(python3 - <<PY
+import json
+labels = []
+if "$GUARD_PASS" != "true": labels.append("regression-128")
+if "$GUARD_512_PASS" != "true": labels.append("regression-512")
+if "$GUARD_4K_PASS" != "true": labels.append("regression-4k")
+if "$GUARD_16K_PASS" != "true": labels.append("regression-16k")
+print(json.dumps(labels, separators=(",", ":")))
+PY
+)"
   ALL_GUARDS_PASS="$(python3 - <<PY
 print("true" if all(x == "true" for x in ["$GUARD_PASS", "$GUARD_512_PASS", "$GUARD_4K_PASS", "$GUARD_16K_PASS"]) else "false")
+PY
+)"
+  HAS_VERIFIED_CONTEXT_GAIN="$(python3 - <<PY
+print("true" if float("$SELECTED_GAIN") > 0.02 else "false")
 PY
 )"
 fi
@@ -257,6 +276,7 @@ data = {
   "score_context": score_ctx,
   "best_context_label": "$BEST_CONTEXT_LABEL",
   "context_gains_pct": json.loads('''$CONTEXT_GAINS_JSON'''),
+  "regression_labels": json.loads('''${REGRESSION_LABELS_JSON:-[]}'''),
 }
 if "$EVAL_MODE" != "short":
   data.update({
@@ -288,7 +308,7 @@ if "$EVAL_MODE" != "short":
 print(json.dumps(data, separators=(",", ":")))
 PY
 )"
-if [ "$EVAL_MODE" != "short" ] && [ "$ALL_GUARDS_PASS" != "true" ]; then
+if [ "$EVAL_MODE" != "short" ] && [ "$ALL_GUARDS_PASS" != "true" ] && [ "$HAS_VERIFIED_CONTEXT_GAIN" != "true" ]; then
   PROV="$PROV" python3 - <<PY
 import json, os
 tps=float("$SELECTED_TPS"); frontier=float("$SELECTED_FRONTIER"); guard=float("$GUARD_TPS")
@@ -314,6 +334,7 @@ res = {
   "label": "REJECT",
   "pass": False,
   "reason": "; ".join(reasons) or "decode no-regression guard failed",
+  "auto_close": True,
 }
 if frontier > 0:
   res["delta_tps"] = round(tps - frontier, 2)

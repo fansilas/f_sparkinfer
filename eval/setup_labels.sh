@@ -25,4 +25,10 @@ for k in "${!CC[@]}"; do
   gh label create "$k" -R "$REPO" --color "${CC[$k]}" \
      --description "UI-only: strongest measured context in sparkinfer eval" --force >/dev/null
 done
-echo "eval:*, area:*, and *-context labels ready on $REPO"
+
+declare -A RC=( [regression-128]=F4A3A8 [regression-512]=E7828A [regression-4k]=D95D67 [regression-16k]=B60205 )
+for k in "${!RC[@]}"; do
+  gh label create "$k" -R "$REPO" --color "${RC[$k]}" \
+     --description "sparkinfer eval regression marker for this context" --force >/dev/null
+done
+echo "eval:*, area:*, *-context, and regression-* labels ready on $REPO"

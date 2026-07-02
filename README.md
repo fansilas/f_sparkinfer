@@ -85,6 +85,10 @@ builds your branch **from source** on an RTX 5090, gates **correctness** (token-
 llama.cpp), checks that **128-token, 512-context, 4k-context, and 16k-context decode do not
 regress**, scores the **strongest verified context improvement**, and posts a comment with an
 **`eval:<label>`** verdict plus a UI-only context label such as `4k-context`:
+Mixed outcomes are explicit: a real >2% win in one context can score while regressions elsewhere
+are marked with `regression-*` labels and blocked from auto-merge; if no single context clears 2%
+and any context regresses, the PR is `eval:REJECT` and auto-closed. Sub-2% gains are never
+aggregated across contexts.
 
 | label | meaning |
 |---|---|

@@ -38,8 +38,10 @@ value. Reuse mode assumes the weights are cached at `/workspace/models`.
 
 The default eval target is now multi-context decode:
 - **128-token, 512-context, 4k-context, and 16k-context decode** are all no-regression guards. A PR must keep at least 98% of same-box `origin/main` speed at every measured context.
-- The **strongest verified context improvement** becomes the scored target for `eval:<label>`.
+- The **strongest single context improvement** becomes the scored target for `eval:<label>`. Improvements are never aggregated across contexts; two sub-2% gains do not combine into a score.
 - The bot also applies a UI-only context label (`128-context`, `512-context`, `4k-context`, or `16k-context`) for the context that improved most. This does not change the score.
+- If a PR has both a real context win and a regression elsewhere, it is not rejected automatically; the bot adds `regression-128`, `regression-512`, `regression-4k`, and/or `regression-16k` labels for the regressed contexts. Regression labels block auto-merge and require maintainer judgment.
+- If no single context clears the 2% significance gate and any context regresses, the bot returns `eval:REJECT` and auto-closes the PR.
 - Difficulty compensation uses the selected context's llama.cpp baseline, so late-game improvements past the mature reference get the same multiplier logic at every context.
 
 32k telemetry is disabled by default; set `SPARKINFER_REPORT_REPS=1` only for explicit manual probes.
