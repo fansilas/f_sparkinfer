@@ -3,6 +3,45 @@
 Notable changes to sparkinfer. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions track the GitHub [releases](https://github.com/gittensor-ai-lab/sparkinfer/releases).
 
+## [0.3.5] — 2026-07-03
+
+This release lands the long-context follow-through: sparkinfer now beats the llama.cpp Q4_K_M baseline
+at every tracked dashboard context size — **128, 512, 4k, and 16k** — on the same RTX 5090 and same
+GGUF. The headline is no longer only the short decode frontier; the 16k path is now ahead too.
+
+![sparkinfer v0.3.5 all tracked contexts pass llama.cpp](docs/releases/v0.3.5.png)
+
+### Performance — all tracked context sizes are past llama.cpp
+
+Same RTX 5090, same Qwen3-MoE Q4_K_M GGUF, 128 generated tokens:
+
+| context target | sparkinfer | llama.cpp | delta |
+|---|---:|---:|---:|
+| **128-token decode** | **493.56 tok/s** | 365.85 tok/s | **+34.9%** |
+| **512-context decode** | **469.58 tok/s** | 342.59 tok/s | **+37.1%** |
+| **4k-context decode** | **392.65 tok/s** | 292.99 tok/s | **+34.0%** |
+| **16k-context decode** | **266.14 tok/s** | 245.53 tok/s | **+8.4%** |
+
+### Changed — the benchmark surface is now context-aware
+
+The evaluation loop now treats **128, 512, 4k, and 16k** as first-class guard surfaces. A PR can earn
+credit for improving any one context by at least 2%, without aggregating small gains across unrelated
+contexts. Regressions are labeled by context (`regression-128`, `regression-512`, `regression-4k`,
+`regression-16k`) so contributors can see exactly where a change helped or hurt.
+
+The dashboard was updated to show the full context comparison directly against llama.cpp, including
+both card summaries and paired horizontal bars. This keeps the public frontier easy to scan while the
+project moves from short-decode wins into long-context competition.
+
+### Momentum
+
+v0.3.4 proved the first short-decode optimization round. v0.3.5 proves the next step: the same
+optimization loop can push past llama.cpp across the visible context ladder, including 16k. The next
+frontier remains deeper long-context work: 16k/32k stability, paged/KV read efficiency, KV staging, and
+continued decode-kernel occupancy work.
+
+Thanks to all contributors and reviewers keeping the benchmark loop fast, public, and competitive.
+
 ## [0.3.4] — 2026-07-02
 
 This release closes the **first round of decode optimization** and marks it as a working proof of
