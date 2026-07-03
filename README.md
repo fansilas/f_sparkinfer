@@ -12,27 +12,18 @@ _It is designed for the next generation of personal agents like **Openclaw**, lo
 
 ## Benchmark
 
-Live RTX 5090 frontier, same Q4_K_M GGUF, 128 generated tokens:
+Live RTX 5090 decode, batch size 1, 128 generated tokens:
 
-| context | sparkinfer | llama.cpp |
-|---:|---:|---:|
-| 128 | **493.56 tok/s** | 365.85 tok/s |
-| 512 | **469.58 tok/s** | 342.59 tok/s |
-| 4k | **392.65 tok/s** | 292.99 tok/s |
-| 16k | **266.14 tok/s** | 245.53 tok/s |
+| context | sparkinfer<br>GGUF Q4_K_M | llama.cpp<br>GGUF Q4_K_M | vLLM<br>GPTQ Int4 | SGLang<br>GPTQ Int4 | TensorRT-LLM<br>NVFP4 |
+|---:|---:|---:|---:|---:|---:|
+| 128 | **493.56 tok/s** | 365.85 tok/s | 280.83 tok/s | 241.21 tok/s | 99.00 tok/s |
+| 512 | **469.58 tok/s** | 342.59 tok/s | 270.86 tok/s | 239.82 tok/s | 98.59 tok/s |
+| 4k | **392.65 tok/s** | 292.99 tok/s | 202.65 tok/s | 234.67 tok/s | failed |
+| 16k | **266.14 tok/s** | 245.53 tok/s | 81.89 tok/s | 226.12 tok/s | not run |
 
-The path so far:
-
-- RTX PRO 6000 proof: Qwen3-30B-A3B runs end-to-end, resident at about 21.7 GB with experts kept quantized.
-- RTX 5090 frontier: short-context decode moved from the initial 0.6 tok/s baseline to 493.56 tok/s.
-- Long-context work is now measured explicitly at 512, 4k, and 16k context so optimizations cannot hide a regression in another context.
-- Correctness is gated against llama.cpp with top-1 agreement and KL checks before any speed label is accepted.
-- Every evaluated PR has a reproducible source build and a public run log.
-
-Live data: [dashboard](https://gittensor-ai-lab.github.io/sparkinfer/dashboard/) ·
-[eval logs](https://github.com/gittensor-ai-lab/sparkinfer-log) ·
-[trust model](EVAL-TRUST.md) ·
-[miner guide](docs/miner-guide.md)
+sparkinfer and llama.cpp use the same Qwen3-30B-A3B Q4_K_M GGUF. vLLM, SGLang, and
+TensorRT-LLM use their best successful quantized HF checkpoint path from the same RTX 5090
+competitor run; see [`bench/competitors/latest-results.md`](bench/competitors/latest-results.md).
 
 ## How we move fast on SN74
 
