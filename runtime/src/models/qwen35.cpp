@@ -327,7 +327,7 @@ int Qwen35Model::forward_token(int token_id, int position) {
                                            s.fa_m, s.fa_l, s.fa_acc, 1, c.n_q_heads, c.n_kv_heads, c.head_dim,
                                            s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits,
                                            1.f / sqrtf((float)c.head_dim), st,
-                                           emit_attn_q8 ? s.aq81 : nullptr);
+                                           emit_attn_q8 ? s.aq81 : nullptr, seqlen);
         if (s.gguf && s.use_pq && w.wo_type == 12) {   // O proj reads attn: quantize once + dp4a
             if (s.use_llama) {
                 if (!emit_attn_q8) kernels::launch_quantize_q8_1_blocks(s.attn, s.aq81, s.qdim, st);
