@@ -19,6 +19,7 @@ struct KVCacheConfig {
     int block_size = 16;        // tokens per page block
     KVLayout layout = KVLayout::PAGED;
     bool fp8_kv = false;        // FP8 KV cache compression
+    bool int8_kv = false;       // int8 (Q8-style) KV cache; halves the long-context KV read
 };
 
 // GPU-side KV block pool.

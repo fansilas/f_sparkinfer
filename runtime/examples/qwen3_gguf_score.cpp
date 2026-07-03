@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
 
     auto rt = sparkinfer::Runtime::create({}); rt->initialize();
     sparkinfer::KVCacheConfig kvc;
-    kvc.num_layers = cfg.n_layers; kvc.num_kv_heads = cfg.n_kv_heads; kvc.head_dim = cfg.head_dim; kvc.block_size = 16;
+    kvc.num_layers = cfg.n_layers; kvc.num_kv_heads = cfg.n_kv_heads; kvc.head_dim = cfg.head_dim; kvc.block_size = 16; kvc.int8_kv = !(getenv("SPARKINFER_KV_INT8") && getenv("SPARKINFER_KV_INT8")[0]=='0');
     const size_t epb = (size_t)16 * cfg.n_kv_heads * cfg.head_dim;
     const size_t blocks = (cfg.max_seq + 15) / 16 + 8;
     sparkinfer::KVCacheManager kv(kvc, (size_t)cfg.n_layers * 2 * epb * 2 * blocks);

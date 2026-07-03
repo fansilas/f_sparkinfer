@@ -127,6 +127,7 @@ __global__ void fa_split_gqa_kernel(
     __nv_bfloat16* s_k = s_kv;
     __nv_bfloat16* s_v = s_kv + (size_t)TILE * HEAD_DIM;
     __shared__ size_t s_rowbase[TILE];   // per-token global row base, resolved once (not per head-dim)
+    __shared__ float s_ksc[TILE], s_vsc[TILE];   // int8: per-token dequant scales, resolved once
 
     for (int t0 = start; t0 < end; t0 += TILE) {
         const int valid = min(TILE, end - t0);
@@ -136,7 +137,9 @@ __global__ void fa_split_gqa_kernel(
             const int t = t0 + threadIdx.x;
             const int blk = t / block_size, wb = t % block_size;
             const int phys = block_table[seq * max_blocks + blk];
-            s_rowbase[threadIdx.x] = ((size_t)(phys * block_size + wb) * num_kv_heads + kvh) * HEAD_DIM;
+            const size_t tokrow = (size_t)(phys * block_size + wb) * num_kv_heads + kvh;
+            s_rowbase[threadIdx.x] = tokrow * HEAD_DIM;
+            if (int8_kv) { s_ksc[threadIdx.x] = __half2float(k_scale[tokrow]); s_vsc[threadIdx.x] = __half2float(v_scale[tokrow]); }
         }
         __syncthreads();
         if (!int8_kv) {
@@ -156,8 +159,7 @@ __global__ void fa_split_gqa_kernel(
             for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
                 const int within = i / HEAD_DIM, d = i % HEAD_DIM;
                 const size_t base = s_rowbase[within] + d;
-                const float ks = __half2float(k_scale[s_rowbase[within] / HEAD_DIM]);
-                const float vs = __half2float(v_scale[s_rowbase[within] / HEAD_DIM]);
+                const float ks = s_ksc[within], vs = s_vsc[within];
                 const int2 kr = __ldg(reinterpret_cast<const int2*>(ki + base));
                 const int2 vr = __ldg(reinterpret_cast<const int2*>(vi + base));
                 const signed char* kc = reinterpret_cast<const signed char*>(&kr);
@@ -623,9 +625,12 @@ void launch_flash_decode_split(
     // chunk is a multiple of block_size (16) — enabled only then; other contexts use the scalar kernel.
     static int famma = -1;
     if (famma < 0) { const char* e = getenv("SPARKINFER_FAMMA"); famma = (e && e[0] == '0') ? 0 : 1; }
-    // Long-context regime only (attention is a small fraction of short-context decode); requires
-    // block_size==16 (each warp maps to one physical block). Robust to any chunk (partial blocks masked).
-    const bool mma_aligned = famma && seqlen > 512 && block_size == 16;
+    // Long-context regime only: requires block_size==16 (each warp maps to one physical block) AND a
+    // large-enough per-split chunk (>=2 physical blocks). At tiny chunks the GQA-shared mma has too
+    // few blocks/warps to fill the GPU and loses to the high-occupancy scalar split; those short
+    // contexts use the scalar (int8-dequant) path. Robust to any chunk (partial blocks masked).
+    const int mma_chunk = (n_splits > 0) ? (seqlen + n_splits - 1) / n_splits : 0;
+    const bool mma_aligned = famma && seqlen > 512 && block_size == 16 && mma_chunk >= 32;
     const __half* ksc = reinterpret_cast<const __half*>(k_scale);
     const __half* vsc = reinterpret_cast<const __half*>(v_scale);
     if (use_gqa && num_kv_heads > 0 && num_q_heads == num_kv_heads * 8) {

@@ -46,8 +46,9 @@ KVCacheManager::KVCacheManager(const KVCacheConfig& cfg, size_t pool_bytes)
     : impl_(new Impl()) {
     impl_->cfg = cfg;
     // int8 KV (Q8-style, per-token per-kv-head fp16 scale): 1 byte/elem + one scale per head vector,
-    // halving the long-context KV read for the tensor-core flash-decode. SPARKINFER_KV_INT8=0 -> bf16.
-    { const char* e = getenv("SPARKINFER_KV_INT8"); impl_->int8_kv = !(e && e[0] == '0'); }
+    // halving the long-context KV read for the tensor-core flash-decode. Opt-in via cfg.int8_kv (the
+    // Qwen3 example mains set it from SPARKINFER_KV_INT8, default on); other consumers stay bf16.
+    impl_->int8_kv = cfg.int8_kv;
     const int elem_bytes = impl_->int8_kv ? 1 : (int)sizeof(unsigned short);
     const size_t elems_per_block = (size_t)cfg.block_size * cfg.num_kv_heads * cfg.head_dim;
     // total_blocks sized against the bf16 budget so callers/capacity are unchanged; int8 just mallocs
