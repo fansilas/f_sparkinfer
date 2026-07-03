@@ -296,13 +296,19 @@ int Qwen35Model::forward_token(int token_id, int position) {
             kernels::launch_gemm(s.xn, w.wk, s.k, 1, s.kvdim, H, 1.f, 0.f, gc, st);
             kernels::launch_gemm(s.xn, w.wv, s.v, 1, s.kvdim, H, 1.f, 0.f, gc, st);
         }
-        bf16* kpool = (bf16*)s.kv->k_pool() + (size_t)L * s.kv->layer_stride_elems();
-        bf16* vpool = (bf16*)s.kv->v_pool() + (size_t)L * s.kv->layer_stride_elems();
-        if (s.use_attnin) {   // fused QK-norm + RoPE + KV-append: 1 node vs qk-norm + rope-kv (2)
+        // int8 KV: byte-scaled layer offset (1 B int8 / 2 B bf16) + parallel per-(token,kv_head) scale pool.
+        const bool kv8 = s.kv->int8_kv();
+        const int kv_elem = kv8 ? 1 : 2;
+        void* kpool = (char*)s.kv->k_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
+        void* vpool = (char*)s.kv->v_pool() + (size_t)L * s.kv->layer_stride_elems() * kv_elem;
+        void* kscale = kv8 ? (char*)s.kv->k_scale_pool() + (size_t)L * s.kv->scale_layer_stride_elems() * 2 : nullptr;
+        void* vscale = kv8 ? (char*)s.kv->v_scale_pool() + (size_t)L * s.kv->scale_layer_stride_elems() * 2 : nullptr;
+        if (s.use_attnin || kv8) {   // fused QK-norm + RoPE + KV-append (int8-capable writer; required for int8 KV)
             kernels::launch_qknorm_rope_kv_append(s.q, s.k, s.v, w.q_norm, w.k_norm, kpool, vpool,
                                                   btable, s.d_pos, 1, c.n_q_heads, c.n_kv_heads,
                                                   c.head_dim, c.rope_theta, c.rms_eps,
-                                                  s.kv->block_size(), s.kv->max_blocks_per_seq(), st);
+                                                  s.kv->block_size(), s.kv->max_blocks_per_seq(), st,
+                                                  kscale, vscale, kv8 ? 1 : 0);
         } else {
         if (s.use_qkfuse)
             kernels::launch_rmsnorm_qk(s.q, s.k, w.q_norm, w.k_norm, c.n_q_heads, c.n_kv_heads, c.head_dim, c.rms_eps, st);
@@ -327,7 +333,7 @@ int Qwen35Model::forward_token(int token_id, int position) {
                                            s.fa_m, s.fa_l, s.fa_acc, 1, c.n_q_heads, c.n_kv_heads, c.head_dim,
                                            s.kv->block_size(), s.kv->max_blocks_per_seq(), s.n_splits,
                                            1.f / sqrtf((float)c.head_dim), st,
-                                           emit_attn_q8 ? s.aq81 : nullptr, seqlen);
+                                           emit_attn_q8 ? s.aq81 : nullptr, seqlen, kscale, vscale, kv8 ? 1 : 0);
         if (s.gguf && s.use_pq && w.wo_type == 12) {   // O proj reads attn: quantize once + dp4a
             if (s.use_llama) {
                 if (!emit_attn_q8) kernels::launch_quantize_q8_1_blocks(s.attn, s.aq81, s.qdim, st);

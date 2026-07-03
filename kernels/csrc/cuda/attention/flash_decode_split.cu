@@ -12,6 +12,7 @@
 // One warp per block; head_dim=128 (Qwen3). Portable CUDA — sm_89 .. sm_120/121.
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #ifndef SPARKINFER_NVRTC_DEVICE_ONLY
 #include <cuda_runtime.h>
 #endif
@@ -26,13 +27,15 @@ __device__ __forceinline__ float fa_wsum(float v) {
     return v;
 }
 
+// int8_kv: k_pool/v_pool hold int8 and k_scale/v_scale one __half per (token, kv_head) head vector.
 template <int HEAD_DIM>
 __global__ void fa_split_kernel(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k_pool,
-    const __nv_bfloat16* __restrict__ v_pool, const int* __restrict__ block_table,
+    const __nv_bfloat16* __restrict__ q, const void* __restrict__ k_pool,
+    const void* __restrict__ v_pool, const int* __restrict__ block_table,
     const int* __restrict__ seq_lens,
     float* __restrict__ part_m, float* __restrict__ part_l, float* __restrict__ part_acc,
-    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits
+    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits,
+    const __half* __restrict__ k_scale, const __half* __restrict__ v_scale, int int8_kv
 ) {
     constexpr int ELEMS = HEAD_DIM / 32;
     const int seq   = blockIdx.y;
@@ -40,6 +43,10 @@ __global__ void fa_split_kernel(
     const int qh    = blockIdx.x / n_splits;
     const int lane  = threadIdx.x;
     const int kvh   = qh / (num_q_heads / num_kv_heads);
+    const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(k_pool);
+    const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(v_pool);
+    const signed char* ki = reinterpret_cast<const signed char*>(k_pool);
+    const signed char* vi = reinterpret_cast<const signed char*>(v_pool);
 
     float qr[ELEMS];
     const __nv_bfloat16* qp = q + (size_t)(seq * num_q_heads + qh) * HEAD_DIM;
@@ -59,14 +66,18 @@ __global__ void fa_split_kernel(
         const int blk = t / block_size, within = t % block_size;
         const int phys = block_table[seq * max_blocks + blk];
         const size_t base = ((size_t)(phys * block_size + within) * num_kv_heads + kvh) * HEAD_DIM;
+        const float ks = int8_kv ? __half2float(k_scale[base / HEAD_DIM]) : 0.f;
+        const float vs = int8_kv ? __half2float(v_scale[base / HEAD_DIM]) : 0.f;
         float p = 0.f;
         #pragma unroll
-        for (int e = 0; e < ELEMS; e++) p += qr[e] * fa_to_f(k_pool[base + lane + e * 32]);
+        for (int e = 0; e < ELEMS; e++)
+            p += qr[e] * (int8_kv ? (float)ki[base + lane + e * 32] * ks : fa_to_f(kb[base + lane + e * 32]));
         const float score = fa_wsum(p) * scale;
         const float mn = fmaxf(m, score), corr = __expf(m - mn), pe = __expf(score - mn);
         l = l * corr + pe;
         #pragma unroll
-        for (int e = 0; e < ELEMS; e++) acc[e] = acc[e] * corr + pe * fa_to_f(v_pool[base + lane + e * 32]);
+        for (int e = 0; e < ELEMS; e++)
+            acc[e] = acc[e] * corr + pe * (int8_kv ? (float)vi[base + lane + e * 32] * vs : fa_to_f(vb[base + lane + e * 32]));
         m = mn;
     }
 
@@ -83,11 +94,12 @@ __global__ void fa_split_kernel(
 // partials consumed by the existing combine kernel.
 template <int HEAD_DIM, int GQA, int TILE>
 __global__ void fa_split_gqa_kernel(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k_pool,
-    const __nv_bfloat16* __restrict__ v_pool, const int* __restrict__ block_table,
+    const __nv_bfloat16* __restrict__ q, const void* __restrict__ k_pool,
+    const void* __restrict__ v_pool, const int* __restrict__ block_table,
     const int* __restrict__ seq_lens,
     float* __restrict__ part_m, float* __restrict__ part_l, float* __restrict__ part_acc,
-    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits
+    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits,
+    const __half* __restrict__ k_scale, const __half* __restrict__ v_scale, int int8_kv
 ) {
     constexpr int ELEMS = HEAD_DIM / 32;
     const int seq   = blockIdx.y;
@@ -127,12 +139,35 @@ __global__ void fa_split_gqa_kernel(
             s_rowbase[threadIdx.x] = ((size_t)(phys * block_size + wb) * num_kv_heads + kvh) * HEAD_DIM;
         }
         __syncthreads();
-        // Vectorized load: uint4 (8×bf16) via __ldg into bf16 smem.
-        for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
-            const int within = i / HEAD_DIM, d = i % HEAD_DIM;
-            const size_t base = s_rowbase[within] + d;
-            *reinterpret_cast<uint4*>(s_k + i) = __ldg(reinterpret_cast<const uint4*>(k_pool + base));
-            *reinterpret_cast<uint4*>(s_v + i) = __ldg(reinterpret_cast<const uint4*>(v_pool + base));
+        if (!int8_kv) {
+            // Vectorized load: uint4 (8×bf16) via __ldg into bf16 smem.
+            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(k_pool);
+            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(v_pool);
+            for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
+                const int within = i / HEAD_DIM, d = i % HEAD_DIM;
+                const size_t base = s_rowbase[within] + d;
+                *reinterpret_cast<uint4*>(s_k + i) = __ldg(reinterpret_cast<const uint4*>(kb + base));
+                *reinterpret_cast<uint4*>(s_v + i) = __ldg(reinterpret_cast<const uint4*>(vb + base));
+            }
+        } else {
+            // int8: load 8 int8 (int2) + per-token scale, dequant to bf16 into smem (dot loop unchanged).
+            const signed char* ki = reinterpret_cast<const signed char*>(k_pool);
+            const signed char* vi = reinterpret_cast<const signed char*>(v_pool);
+            for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
+                const int within = i / HEAD_DIM, d = i % HEAD_DIM;
+                const size_t base = s_rowbase[within] + d;
+                const float ks = __half2float(k_scale[s_rowbase[within] / HEAD_DIM]);
+                const float vs = __half2float(v_scale[s_rowbase[within] / HEAD_DIM]);
+                const int2 kr = __ldg(reinterpret_cast<const int2*>(ki + base));
+                const int2 vr = __ldg(reinterpret_cast<const int2*>(vi + base));
+                const signed char* kc = reinterpret_cast<const signed char*>(&kr);
+                const signed char* vc = reinterpret_cast<const signed char*>(&vr);
+                #pragma unroll
+                for (int j = 0; j < 8; j++) {
+                    s_k[i + j] = __float2bfloat16((float)kc[j] * ks);
+                    s_v[i + j] = __float2bfloat16((float)vc[j] * vs);
+                }
+            }
         }
         __syncthreads();
         for (int tt = 0; tt < valid; tt++) {
@@ -243,10 +278,10 @@ __global__ void fa_combine_kernel(
 #ifndef FA_GQA_TILE
 #define FA_GQA_TILE 14      // bf16 smem + uint4 ldg sweet spot at n_splits=128
 #endif
-template __global__ void fa_split_kernel<128>(const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
-    const int*, const int*, float*, float*, float*, float, int, int, int, int, int);
-template __global__ void fa_split_gqa_kernel<128, 8, FA_GQA_TILE>(const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
-    const int*, const int*, float*, float*, float*, float, int, int, int, int, int);
+template __global__ void fa_split_kernel<128>(const __nv_bfloat16*, const void*, const void*,
+    const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*, int);
+template __global__ void fa_split_gqa_kernel<128, 8, FA_GQA_TILE>(const __nv_bfloat16*, const void*, const void*,
+    const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*, int);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, FA_COMBINE_NW>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, 8>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, 16>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
@@ -389,6 +424,164 @@ __global__ void fa_split_gqa_mma_kernel(
 template __global__ void fa_split_gqa_mma_kernel<128, 8>(const __nv_bfloat16*, const __nv_bfloat16*,
     const __nv_bfloat16*, const int*, const int*, float*, float*, float*, float, int, int, int, int, int);
 
+// int8 variant: K/V are int8 with one fp16 scale per (token, kv_head) head vector. Q is quantized
+// per-q-head and P (with the per-token V scale folded in) per-row, so QK and PV run on int8 tensor
+// cores (int32 accumulate); the per-token/per-head fp16 scales are applied to the int32 results.
+// Halves the KV global read (the bottleneck) and uses 2x-throughput int8 tensor cores.
+template <int HEAD_DIM, int GQA>
+__global__ void fa_split_gqa_mma_i8_kernel(
+    const __nv_bfloat16* __restrict__ q, const signed char* __restrict__ k_pool,
+    const signed char* __restrict__ v_pool, const int* __restrict__ block_table,
+    const int* __restrict__ seq_lens,
+    float* __restrict__ part_m, float* __restrict__ part_l, float* __restrict__ part_acc,
+    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits,
+    const __half* __restrict__ k_scale, const __half* __restrict__ v_scale
+) {
+    using namespace nvcuda::wmma;
+    constexpr int KH = HEAD_DIM / 16;
+    const int seq = blockIdx.y, split = blockIdx.x % n_splits, kvh = blockIdx.x / n_splits;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, tid = threadIdx.x;
+    const int sl = seq_lens[seq];
+    const int chunk = (sl + n_splits - 1) / n_splits;
+    const int start = split * chunk, end = min(sl, start + chunk);
+    const size_t KVLD = (size_t)num_kv_heads * HEAD_DIM;   // int8 token stride in the pool
+    const int SLD = num_kv_heads;                          // scale stride (one per token, kv_head)
+
+    extern __shared__ char i8smem[];
+    signed char* s_qi = reinterpret_cast<signed char*>(i8smem);       // [16][HD] quantized Q
+    signed char* s_pi = s_qi + 16 * HEAD_DIM;                         // [16][HD] quantized P'
+    float* s_s  = reinterpret_cast<float*>(s_pi + 16 * HEAD_DIM);     // [16][HD] scores / int32 mma scratch
+    float* s_o  = s_s + 16 * HEAD_DIM;                                // [16][HD] running O
+    float* s_qs = s_o + 16 * HEAD_DIM;                                // [16] Q scale
+    float* s_ps = s_qs + 16;                                          // [16] P' row scale
+    float* s_ks = s_ps + 16;                                          // [128] group K scales
+    float* s_vs = s_ks + 128;                                         // [128] group V scales
+    float* s_m  = s_vs + 128;                                         // [16]
+    float* s_l  = s_m + 16;                                           // [16]
+
+    // Quantize Q per q-head row (warp w owns rows 2w, 2w+1; rows >= GQA are zero pad).
+    #pragma unroll
+    for (int rr = 0; rr < 2; rr++) {
+        const int r = warp * 2 + rr;
+        float qv[4], amax = 0.f;
+        #pragma unroll
+        for (int e = 0; e < 4; e++) {
+            qv[e] = (r < GQA) ? __bfloat162float(q[(size_t)(seq * num_q_heads + kvh * GQA + r) * HEAD_DIM + lane + e * 32]) : 0.f;
+            amax = fmaxf(amax, fabsf(qv[e]));
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, o));
+        const float d = amax / 127.0f;
+        if (lane == 0) s_qs[r] = d;
+        #pragma unroll
+        for (int e = 0; e < 4; e++)
+            s_qi[r * HEAD_DIM + lane + e * 32] = (signed char)((amax == 0.f) ? 0 : (int)roundf(qv[e] / d));
+    }
+    for (int i = tid; i < 16 * HEAD_DIM; i += blockDim.x) s_o[i] = 0.f;
+    if (tid < 16) { s_m[tid] = -1e30f; s_l[tid] = 0.f; }
+    __syncthreads();
+
+    const int first_blk = start / 16;
+    const int nblk = (end > start) ? ((end - 1) / 16 - first_blk + 1) : 0;
+    for (int g0 = 0; g0 < nblk; g0 += 8) {
+        const int gblk = min(8, nblk - g0);
+        const int gbase = (first_blk + g0) * 16;
+        for (int j = tid; j < gblk * 16; j += blockDim.x) {   // stage per-token K/V scales for the group
+            const int lb = first_blk + g0 + j / 16, within = j & 15;
+            const int pb = block_table[seq * max_blocks + lb];
+            const size_t si = (size_t)(pb * 16 + within) * SLD + kvh;
+            s_ks[j] = __half2float(k_scale[si]);
+            s_vs[j] = __half2float(v_scale[si]);
+        }
+        __syncthreads();
+
+        // QK int8 mma -> int32; scale to float scores in s_s.
+        if (warp < gblk) {
+            const int pb = block_table[seq * max_blocks + first_blk + g0 + warp];
+            const signed char* kb = k_pool + ((size_t)pb * 16 * num_kv_heads + kvh) * HEAD_DIM;
+            fragment<matrix_a, 16, 16, 16, signed char, row_major> af;
+            fragment<matrix_b, 16, 16, 16, signed char, col_major> bf;
+            fragment<accumulator, 16, 16, 16, int> cf;
+            fill_fragment(cf, 0);
+            #pragma unroll
+            for (int ks = 0; ks < KH; ks++) {
+                load_matrix_sync(af, s_qi + ks * 16, HEAD_DIM);
+                load_matrix_sync(bf, kb + ks * 16, KVLD);
+                mma_sync(cf, af, bf, cf);
+            }
+            store_matrix_sync(reinterpret_cast<int*>(s_s) + warp * 16, cf, HEAD_DIM, mem_row_major);
+        }
+        __syncthreads();
+        for (int i = tid; i < 16 * 128; i += blockDim.x) {
+            const int m = i >> 7, col = i & 127;
+            if (col < gblk * 16) s_s[i] = (float)reinterpret_cast<int*>(s_s)[i] * s_qs[m] * s_ks[col];
+        }
+        __syncthreads();
+
+        // Online softmax; fold V scale into P', quantize P' per-row into s_pi.
+        #pragma unroll
+        for (int rr = 0; rr < 2; rr++) {
+            const int r = warp * 2 + rr;
+            float mx = -1e30f;
+            for (int t = lane; t < gblk * 16; t += 32) {
+                const int gtok = gbase + t;
+                if (gtok >= start && gtok < end) mx = fmaxf(mx, s_s[r * 128 + t] * scale);
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, o));
+            const float m_old = s_m[r], m_new = fmaxf(m_old, mx), corr = __expf(m_old - m_new);
+            float sum = 0.f, pamax = 0.f;
+            for (int t = lane; t < 128; t += 32) {
+                float pv = 0.f;
+                const int gtok = gbase + t;
+                if (t < gblk * 16 && gtok >= start && gtok < end) {
+                    const float p = __expf(s_s[r * 128 + t] * scale - m_new);
+                    sum += p; pv = p * s_vs[t]; pamax = fmaxf(pamax, fabsf(pv));
+                }
+                s_s[r * 128 + t] = pv;   // stash P' (score no longer needed for this row)
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) { sum += __shfl_xor_sync(0xffffffff, sum, o); pamax = fmaxf(pamax, __shfl_xor_sync(0xffffffff, pamax, o)); }
+            const float pd = pamax / 127.0f;
+            if (lane == 0) { s_m[r] = m_new; s_l[r] = s_l[r] * corr + sum; s_ps[r] = pd; }
+            for (int t = lane; t < 128; t += 32)
+                s_pi[r * 128 + t] = (signed char)((pamax == 0.f) ? 0 : (int)roundf(s_s[r * 128 + t] / pd));
+            for (int c = lane; c < HEAD_DIM; c += 32) s_o[r * HEAD_DIM + c] *= corr;
+        }
+        __syncthreads();
+
+        // PV int8 mma -> int32; O += int32 * p_scale[m].
+        {
+            fragment<accumulator, 16, 16, 16, int> cf;
+            fill_fragment(cf, 0);
+            for (int ks = 0; ks < gblk; ks++) {
+                const int pb = block_table[seq * max_blocks + first_blk + g0 + ks];
+                const signed char* vb = v_pool + ((size_t)pb * 16 * num_kv_heads + kvh) * HEAD_DIM + warp * 16;
+                fragment<matrix_a, 16, 16, 16, signed char, row_major> af;
+                fragment<matrix_b, 16, 16, 16, signed char, row_major> bf;
+                load_matrix_sync(af, s_pi + ks * 16, HEAD_DIM);
+                load_matrix_sync(bf, vb, KVLD);
+                mma_sync(cf, af, bf, cf);
+            }
+            store_matrix_sync(reinterpret_cast<int*>(s_s) + warp * 16, cf, HEAD_DIM, mem_row_major);
+        }
+        __syncthreads();
+        for (int i = tid; i < 16 * 128; i += blockDim.x) s_o[i] += (float)reinterpret_cast<int*>(s_s)[i] * s_ps[i >> 7];
+        __syncthreads();
+    }
+
+    for (int r = 0; r < GQA; r++) {
+        const int qh = kvh * GQA + r;
+        const int idx = (seq * num_q_heads + qh) * n_splits + split;
+        if (tid == 0) { part_m[idx] = s_m[r]; part_l[idx] = s_l[r]; }
+        for (int c = tid; c < HEAD_DIM; c += blockDim.x)
+            part_acc[(size_t)idx * HEAD_DIM + c] = s_o[r * HEAD_DIM + c];
+    }
+}
+template __global__ void fa_split_gqa_mma_i8_kernel<128, 8>(const __nv_bfloat16*, const signed char*,
+    const signed char*, const int*, const int*, float*, float*, float*, float, int, int, int, int, int,
+    const __half*, const __half*);
+
 template <int NW>
 static inline void fa_launch_combine(
     const float* part_m, const float* part_l, const float* part_acc,
@@ -416,7 +609,7 @@ void launch_flash_decode_split(
     float* part_m, float* part_l, float* part_acc,
     int num_seqs, int num_q_heads, int num_kv_heads, int head_dim,
     int block_size, int max_blocks, int n_splits, float scale, cudaStream_t stream,
-    void* out_q8, int seqlen
+    void* out_q8, int seqlen, const void* k_scale, const void* v_scale, int int8_kv
 ) {
     static int fagqa = -1;
     if (fagqa < 0) {
@@ -433,18 +626,23 @@ void launch_flash_decode_split(
     // Long-context regime only (attention is a small fraction of short-context decode); requires
     // block_size==16 (each warp maps to one physical block). Robust to any chunk (partial blocks masked).
     const bool mma_aligned = famma && seqlen > 512 && block_size == 16;
+    const __half* ksc = reinterpret_cast<const __half*>(k_scale);
+    const __half* vsc = reinterpret_cast<const __half*>(v_scale);
     if (use_gqa && num_kv_heads > 0 && num_q_heads == num_kv_heads * 8) {
         constexpr int GQA = 8, TILE = FA_GQA_TILE;
         dim3 gq(num_kv_heads * n_splits, num_seqs);
-        if (mma_aligned) {   // block-aligned chunks only (paged-fragment loads are exact)
+        if (mma_aligned && int8_kv) {   // int8 tensor-core (halved KV read)
+            const size_t i8_smem = (size_t)2 * 16 * 128 * sizeof(signed char)
+                                 + (size_t)2 * 16 * 128 * sizeof(float)
+                                 + (size_t)(16 + 16 + 128 + 128 + 16 + 16) * sizeof(float);
+            fa_split_gqa_mma_i8_kernel<128, GQA><<<gq, GQA * 32, i8_smem, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const signed char*>(k_pool),
+                reinterpret_cast<const signed char*>(v_pool), block_table, seq_lens,
+                part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
+                ksc, vsc);
+        } else if (mma_aligned) {   // bf16 tensor-core; block-aligned chunks (paged-fragment loads exact)
             constexpr size_t mma_smem = (size_t)(16 + 16) * 128 * sizeof(__nv_bfloat16)
                                       + (size_t)(16 + 16) * 128 * sizeof(float) + 32 * sizeof(float);
-            static bool set_attr = false;
-            if (!set_attr) {
-                cudaFuncSetAttribute(fa_split_gqa_mma_kernel<128, GQA>,
-                                     cudaFuncAttributeMaxDynamicSharedMemorySize, (int)mma_smem);
-                set_attr = true;
-            }
             fa_split_gqa_mma_kernel<128, GQA><<<gq, GQA * 32, mma_smem, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k_pool),
                 reinterpret_cast<const __nv_bfloat16*>(v_pool), block_table, seq_lens,
@@ -452,9 +650,9 @@ void launch_flash_decode_split(
         } else {
         size_t smem = (size_t)2 * TILE * 128 * sizeof(__nv_bfloat16);
         fa_split_gqa_kernel<128, GQA, TILE><<<gq, GQA * 32, smem, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k_pool),
-            reinterpret_cast<const __nv_bfloat16*>(v_pool), block_table, seq_lens,
-            part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits);
+            reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
+            part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
+            ksc, vsc, int8_kv);
         }
         fa_launch_combine_dispatch(part_m, part_l, part_acc, reinterpret_cast<__nv_bfloat16*>(out),
                                    num_q_heads, n_splits, reinterpret_cast<fa_block_q8_1*>(out_q8), num_seqs, stream);
@@ -463,9 +661,9 @@ void launch_flash_decode_split(
     }
     dim3 g1(num_q_heads * n_splits, num_seqs);
     fa_split_kernel<128><<<g1, 32, 0, stream>>>(
-        reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k_pool),
-        reinterpret_cast<const __nv_bfloat16*>(v_pool), block_table, seq_lens,
-        part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits);
+        reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
+        part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
+        ksc, vsc, int8_kv);
     fa_launch_combine_dispatch(part_m, part_l, part_acc, reinterpret_cast<__nv_bfloat16*>(out),
                                num_q_heads, n_splits, reinterpret_cast<fa_block_q8_1*>(out_q8), num_seqs, stream);
     (void)head_dim;

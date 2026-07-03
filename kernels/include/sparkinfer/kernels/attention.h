@@ -34,7 +34,8 @@ void launch_qknorm_rope_kv_append(
     void* q, void* k, const void* v, const void* q_w, const void* k_w,
     void* k_pool, void* v_pool, const int* block_table, const int* positions,
     int n_tokens, int n_q_heads, int n_kv_heads, int head_dim, float theta,
-    float eps, int block_size, int max_blocks_per_seq, cudaStream_t stream = nullptr);
+    float eps, int block_size, int max_blocks_per_seq, cudaStream_t stream = nullptr,
+    void* k_scale = nullptr, void* v_scale = nullptr, int int8_kv = 0);
 
 // Fused RoPE + paged KV-append: ropes Q in place, ropes K straight into k_pool, copies V into
 // v_pool — one kernel replacing launch_rope + launch_kv_append. positions == write_pos (decode).
@@ -94,7 +95,8 @@ void launch_flash_decode_split(
     float* part_m, float* part_l, float* part_acc,
     int num_seqs, int num_q_heads, int num_kv_heads, int head_dim,
     int block_size, int max_blocks, int n_splits, float scale,
-    cudaStream_t stream = nullptr, void* out_q8 = nullptr, int seqlen = -1);
+    cudaStream_t stream = nullptr, void* out_q8 = nullptr, int seqlen = -1,
+    const void* k_scale = nullptr, const void* v_scale = nullptr, int int8_kv = 0);
 
 // Flash decode for GLOBAL layers: full context, head_dim=512, GQA 8:1.
 // Two-phase dot product splits 512-dim head into two 256-dim halves.
