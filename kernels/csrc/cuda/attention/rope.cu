@@ -130,11 +130,12 @@ __global__ void rope_kv_append_kernel(
 // bf16 rounding, same rope angle); the cached V is identical to kv_append. positions == write_pos.
 // int8_kv: k_pool/v_pool hold signed int8 and k_scale/v_scale one __half per (token slot, kv_head)
 // head vector (per-token max-abs quant). int8_kv==0 is byte-identical bf16.
+template <bool INT8>
 __global__ void qknorm_rope_kv_kernel(
     __nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const __nv_bfloat16* __restrict__ q_w, const __nv_bfloat16* __restrict__ k_w,
     void* __restrict__ k_pool, void* __restrict__ v_pool,
-    __half* __restrict__ k_scale, __half* __restrict__ v_scale, int int8_kv,
+    __half* __restrict__ k_scale, __half* __restrict__ v_scale,
     const int* __restrict__ block_table, const int* __restrict__ positions,
     int n_q_heads, int n_kv_heads, int head_dim, float theta,
     int block_size, int max_blocks_per_seq, float eps
@@ -153,21 +154,25 @@ __global__ void qknorm_rope_kv_kernel(
         const int hh = b - n_q_heads - n_kv_heads;
         const size_t base = ((size_t)(tok * n_kv_heads + hh)) * head_dim;
         const size_t dst  = (ctok * n_kv_heads + hh) * head_dim;
-        if (!int8_kv) { reinterpret_cast<__nv_bfloat16*>(v_pool)[dst + t] = v[base + t]; return; }
-        const float val = __bfloat162float(v[base + t]);   // per-token max-abs int8 quant over head_dim
-        float amax = fabsf(val);
-        #pragma unroll
-        for (int m = 16; m > 0; m >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, m));
-        if ((t & 31) == 0) s_red[t >> 5] = amax;
-        __syncthreads();
-        if (t < 32) { float a = (t < (head_dim + 31) / 32) ? s_red[t] : 0.f;
+        if constexpr (!INT8) {                         // bf16: straight copy — byte-identical to main
+            __nv_bfloat16* __restrict__ vp = reinterpret_cast<__nv_bfloat16*>(v_pool);
+            vp[dst + t] = v[base + t];
+        } else {
+            const float val = __bfloat162float(v[base + t]);   // per-token max-abs int8 quant over head_dim
+            float amax = fabsf(val);
             #pragma unroll
-            for (int m = 16; m > 0; m >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffff, a, m));
-            if (t == 0) s_red[0] = a; }
-        __syncthreads();
-        const float d = s_red[0] / 127.0f;
-        reinterpret_cast<signed char*>(v_pool)[dst + t] = (signed char)((s_red[0] == 0.f) ? 0 : (int)roundf(val / d));
-        if (t == 0) v_scale[ctok * n_kv_heads + hh] = __float2half(d);
+            for (int m = 16; m > 0; m >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, m));
+            if ((t & 31) == 0) s_red[t >> 5] = amax;
+            __syncthreads();
+            if (t < 32) { float a = (t < (head_dim + 31) / 32) ? s_red[t] : 0.f;
+                #pragma unroll
+                for (int m = 16; m > 0; m >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffff, a, m));
+                if (t == 0) s_red[0] = a; }
+            __syncthreads();
+            const float d = s_red[0] / 127.0f;
+            reinterpret_cast<signed char*>(v_pool)[dst + t] = (signed char)((s_red[0] == 0.f) ? 0 : (int)roundf(val / d));
+            if (t == 0) v_scale[ctok * n_kv_heads + hh] = __float2half(d);
+        }
         return;
     }
 
@@ -206,13 +211,14 @@ __global__ void qknorm_rope_kv_kernel(
         o0 = __bfloat162float(__float2bfloat16(x0 * c - x1 * s));   // bf16-rounded (matches bf16 path)
         o1 = __bfloat162float(__float2bfloat16(x1 * c + x0 * s));
         if (is_q) { q[base + t] = __float2bfloat16(o0); q[base + t + half] = __float2bfloat16(o1); }
-        else if (!int8_kv) {
+        else if constexpr (!INT8) {                    // bf16 K write — byte-identical to main
             const size_t dst = (ctok * n_kv_heads + head) * head_dim;
-            reinterpret_cast<__nv_bfloat16*>(k_pool)[dst + t] = __float2bfloat16(o0);
-            reinterpret_cast<__nv_bfloat16*>(k_pool)[dst + t + half] = __float2bfloat16(o1);
+            __nv_bfloat16* __restrict__ kp = reinterpret_cast<__nv_bfloat16*>(k_pool);
+            kp[dst + t] = __float2bfloat16(o0);
+            kp[dst + t + half] = __float2bfloat16(o1);
         }
     }
-    if (!is_q && int8_kv) {                        // K int8: per-token max-abs over all head_dim
+    if constexpr (INT8) if (!is_q) {               // K int8: per-token max-abs over all head_dim
         float amax = fmaxf(fabsf(o0), fabsf(o1));  // thread t<half holds dims t and t+half
         #pragma unroll
         for (int m = 16; m > 0; m >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, m));
@@ -231,6 +237,12 @@ __global__ void qknorm_rope_kv_kernel(
         if (t == 0) k_scale[ctok * n_kv_heads + head] = __float2half(d);
     }
 }
+template __global__ void qknorm_rope_kv_kernel<false>(
+    __nv_bfloat16*, __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
+    void*, void*, __half*, __half*, const int*, const int*, int, int, int, float, int, int, float);
+template __global__ void qknorm_rope_kv_kernel<true>(
+    __nv_bfloat16*, __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
+    void*, void*, __half*, __half*, const int*, const int*, int, int, int, float, int, int, float);
 
 #ifndef SPARKINFER_NVRTC_DEVICE_ONLY
 #include "sparkinfer/kernels/attention.h"
@@ -248,13 +260,24 @@ void launch_qknorm_rope_kv_append(
     void* k_scale, void* v_scale, int int8_kv
 ) {
     dim3 grid(n_q_heads + 2 * n_kv_heads, n_tokens);
-    qknorm_rope_kv_kernel<<<grid, head_dim, head_dim * sizeof(float), stream>>>(
-        reinterpret_cast<__nv_bfloat16*>(q), reinterpret_cast<__nv_bfloat16*>(k),
-        reinterpret_cast<const __nv_bfloat16*>(v),
-        reinterpret_cast<const __nv_bfloat16*>(q_w), reinterpret_cast<const __nv_bfloat16*>(k_w),
-        k_pool, v_pool, reinterpret_cast<__half*>(k_scale), reinterpret_cast<__half*>(v_scale), int8_kv,
-        block_table, positions, n_q_heads, n_kv_heads, head_dim, theta,
-        block_size, max_blocks_per_seq, eps);
+    const int smem = head_dim * sizeof(float);
+    // int8 off (bf16) instantiates with no int8 code -> byte-identical to the pre-int8 (main) kernel.
+    if (int8_kv)
+        qknorm_rope_kv_kernel<true><<<grid, head_dim, smem, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(q), reinterpret_cast<__nv_bfloat16*>(k),
+            reinterpret_cast<const __nv_bfloat16*>(v),
+            reinterpret_cast<const __nv_bfloat16*>(q_w), reinterpret_cast<const __nv_bfloat16*>(k_w),
+            k_pool, v_pool, reinterpret_cast<__half*>(k_scale), reinterpret_cast<__half*>(v_scale),
+            block_table, positions, n_q_heads, n_kv_heads, head_dim, theta,
+            block_size, max_blocks_per_seq, eps);
+    else
+        qknorm_rope_kv_kernel<false><<<grid, head_dim, smem, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(q), reinterpret_cast<__nv_bfloat16*>(k),
+            reinterpret_cast<const __nv_bfloat16*>(v),
+            reinterpret_cast<const __nv_bfloat16*>(q_w), reinterpret_cast<const __nv_bfloat16*>(k_w),
+            k_pool, v_pool, reinterpret_cast<__half*>(k_scale), reinterpret_cast<__half*>(v_scale),
+            block_table, positions, n_q_heads, n_kv_heads, head_dim, theta,
+            block_size, max_blocks_per_seq, eps);
 }
 
 void launch_rope_kv_append(void* q, const void* k, const void* v, void* k_pool, void* v_pool,

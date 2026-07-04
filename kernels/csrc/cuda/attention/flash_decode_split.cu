@@ -92,14 +92,14 @@ __global__ void fa_split_kernel(
 // all GQA warps reuse it. For Qwen's 8:1 GQA this cuts long-context KV global
 // reads in the split pass by up to 8x while preserving the same per-q-head
 // partials consumed by the existing combine kernel.
-template <int HEAD_DIM, int GQA, int TILE>
+template <int HEAD_DIM, int GQA, int TILE, bool INT8>
 __global__ void fa_split_gqa_kernel(
     const __nv_bfloat16* __restrict__ q, const void* __restrict__ k_pool,
     const void* __restrict__ v_pool, const int* __restrict__ block_table,
     const int* __restrict__ seq_lens,
     float* __restrict__ part_m, float* __restrict__ part_l, float* __restrict__ part_acc,
     float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits,
-    const __half* __restrict__ k_scale, const __half* __restrict__ v_scale, int int8_kv
+    const __half* __restrict__ k_scale, const __half* __restrict__ v_scale
 ) {
     constexpr int ELEMS = HEAD_DIM / 32;
     const int seq   = blockIdx.y;
@@ -127,7 +127,7 @@ __global__ void fa_split_gqa_kernel(
     __nv_bfloat16* s_k = s_kv;
     __nv_bfloat16* s_v = s_kv + (size_t)TILE * HEAD_DIM;
     __shared__ size_t s_rowbase[TILE];   // per-token global row base, resolved once (not per head-dim)
-    __shared__ float s_ksc[TILE], s_vsc[TILE];   // int8: per-token dequant scales, resolved once
+    __shared__ float s_ksc[INT8 ? TILE : 1], s_vsc[INT8 ? TILE : 1];   // int8 only: per-token dequant scales
 
     for (int t0 = start; t0 < end; t0 += TILE) {
         const int valid = min(TILE, end - t0);
@@ -139,13 +139,14 @@ __global__ void fa_split_gqa_kernel(
             const int phys = block_table[seq * max_blocks + blk];
             const size_t tokrow = (size_t)(phys * block_size + wb) * num_kv_heads + kvh;
             s_rowbase[threadIdx.x] = tokrow * HEAD_DIM;
-            if (int8_kv) { s_ksc[threadIdx.x] = __half2float(k_scale[tokrow]); s_vsc[threadIdx.x] = __half2float(v_scale[tokrow]); }
+            if constexpr (INT8) { s_ksc[threadIdx.x] = __half2float(k_scale[tokrow]); s_vsc[threadIdx.x] = __half2float(v_scale[tokrow]); }
         }
         __syncthreads();
-        if (!int8_kv) {
-            // Vectorized load: uint4 (8×bf16) via __ldg into bf16 smem.
-            const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(k_pool);
-            const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(v_pool);
+        if constexpr (!INT8) {
+            // Vectorized load: uint4 (8×bf16) via __ldg into bf16 smem. __restrict__ recast keeps the
+            // no-alias load codegen identical to the pre-int8 (main) kernel — bf16 guard contexts unchanged.
+            const __nv_bfloat16* __restrict__ kb = reinterpret_cast<const __nv_bfloat16*>(k_pool);
+            const __nv_bfloat16* __restrict__ vb = reinterpret_cast<const __nv_bfloat16*>(v_pool);
             for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
                 const int within = i / HEAD_DIM, d = i % HEAD_DIM;
                 const size_t base = s_rowbase[within] + d;
@@ -154,8 +155,8 @@ __global__ void fa_split_gqa_kernel(
             }
         } else {
             // int8: load 8 int8 (int2) + per-token scale, dequant to bf16 into smem (dot loop unchanged).
-            const signed char* ki = reinterpret_cast<const signed char*>(k_pool);
-            const signed char* vi = reinterpret_cast<const signed char*>(v_pool);
+            const signed char* __restrict__ ki = reinterpret_cast<const signed char*>(k_pool);
+            const signed char* __restrict__ vi = reinterpret_cast<const signed char*>(v_pool);
             for (int i = threadIdx.x * 8; i < valid * HEAD_DIM; i += blockDim.x * 8) {
                 const int within = i / HEAD_DIM, d = i % HEAD_DIM;
                 const size_t base = s_rowbase[within] + d;
@@ -282,8 +283,10 @@ __global__ void fa_combine_kernel(
 #endif
 template __global__ void fa_split_kernel<128>(const __nv_bfloat16*, const void*, const void*,
     const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*, int);
-template __global__ void fa_split_gqa_kernel<128, 8, FA_GQA_TILE>(const __nv_bfloat16*, const void*, const void*,
-    const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*, int);
+template __global__ void fa_split_gqa_kernel<128, 8, FA_GQA_TILE, false>(const __nv_bfloat16*, const void*, const void*,
+    const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*);
+template __global__ void fa_split_gqa_kernel<128, 8, FA_GQA_TILE, true>(const __nv_bfloat16*, const void*, const void*,
+    const int*, const int*, float*, float*, float*, float, int, int, int, int, int, const __half*, const __half*);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, FA_COMBINE_NW>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, 8>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
 template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, 16>(const float*, const float*, const float*, __nv_bfloat16*, int, int, fa_block_q8_1*);
@@ -292,144 +295,14 @@ template __global__ void fa_combine_kernel<128, FA_COMBINE_DG, 16>(const float*,
 #include "sparkinfer/kernels/attention.h"
 #include <mma.h>
 
-// Tensor-core (wmma bf16) GQA flash-decode split. The 8 GQA q-heads of a kv-head are the batch (M)
-// dim, so S = Q[16x128]·Kᵀ[128xT] and O = P[16xT]·V[Tx128] become small bf16 matmuls on the tensor
-// cores — replacing the per-lane FMA + 5-shuffle fa_wsum reduction that dominates the scalar kernel's
-// compute at long context. M is padded 8->16 (upper 8 q-rows zero). Byte-compatible partials
-// (m,l,acc) for the existing combine kernel. Online-softmax loop over NT-token tiles handles any
-// chunk. sm_80+ (wmma bf16). One block per (seq, kv_head, split); 8 warps.
-template <int HEAD_DIM, int GQA>
-__global__ void fa_split_gqa_mma_kernel(
-    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k_pool,
-    const __nv_bfloat16* __restrict__ v_pool, const int* __restrict__ block_table,
-    const int* __restrict__ seq_lens,
-    float* __restrict__ part_m, float* __restrict__ part_l, float* __restrict__ part_acc,
-    float scale, int num_q_heads, int num_kv_heads, int block_size, int max_blocks, int n_splits
-) {
-    using namespace nvcuda::wmma;
-    constexpr int NT = 128;              // tokens per tile
-    constexpr int KH = HEAD_DIM / 16;    // 16-wide steps across head_dim (8)
-    const int seq   = blockIdx.y;
-    const int split = blockIdx.x % n_splits;
-    const int kvh   = blockIdx.x / n_splits;
-    const int warp  = threadIdx.x >> 5;  // 0..7
-    const int lane  = threadIdx.x & 31;
-    const int tid   = threadIdx.x;
-
-    const int sl    = seq_lens[seq];
-    const int chunk = (sl + n_splits - 1) / n_splits;
-    const int start = split * chunk;
-    const int end   = min(sl, start + chunk);
-
-    // Fragments load straight from the paged K/V pool: each warp owns one block_size==16-token
-    // physical block (block-aligned split chunk), which is contiguous in global with token stride
-    // num_kv_heads*HEAD_DIM. No K/V shared staging -> ~24KB smem -> high occupancy. Requires the
-    // launcher to route here only when chunk is a multiple of block_size (block-aligned tiles).
-    const int KVLD = num_kv_heads * HEAD_DIM;    // token stride in the pool
-    extern __shared__ char fmma_smem[];
-    __nv_bfloat16* s_q = reinterpret_cast<__nv_bfloat16*>(fmma_smem);   // [16][HD]
-    __nv_bfloat16* s_p = s_q + 16 * HEAD_DIM;                           // [16][HD]
-    float* s_s = reinterpret_cast<float*>(s_p + 16 * HEAD_DIM);         // [16][HD] scores / PV scratch
-    float* s_o = s_s + 16 * HEAD_DIM;                                   // [16][HD] running O
-    float* s_m = s_o + 16 * HEAD_DIM;                                   // [16]
-    float* s_l = s_m + 16;                                              // [16]
-
-    for (int i = tid; i < 16 * HEAD_DIM; i += blockDim.x) {
-        const int r = i / HEAD_DIM, c = i % HEAD_DIM;
-        s_q[i] = (r < GQA) ? q[(size_t)(seq * num_q_heads + kvh * GQA + r) * HEAD_DIM + c]
-                           : __float2bfloat16(0.f);
-        s_o[i] = 0.f;
-    }
-    if (tid < 16) { s_m[tid] = -1e30f; s_l[tid] = 0.f; }
-    __syncthreads();
-
-    // Robust tiling: each warp owns one whole 16-token physical block overlapping [start,end); tokens
-    // outside the split range are masked. Correct for ANY chunk (aligned or not); requires block_size==16.
-    const int first_blk = start / 16;
-    const int nblk = (end > start) ? ((end - 1) / 16 - first_blk + 1) : 0;
-    for (int g0 = 0; g0 < nblk; g0 += 8) {
-        const int gblk = min(8, nblk - g0);                      // 16-token blocks this group
-        const int gbase = (first_blk + g0) * 16;                 // global token of column 0
-
-        // QK: warp w owns physical block (first_blk+g0+w); S columns [w*16,+16) = that block's tokens.
-        if (warp < gblk) {
-            const int pb = block_table[seq * max_blocks + first_blk + g0 + warp];
-            const __nv_bfloat16* kb = k_pool + ((size_t)pb * 16 * num_kv_heads + kvh) * HEAD_DIM;
-            fragment<matrix_a, 16, 16, 16, __nv_bfloat16, row_major> af;
-            fragment<matrix_b, 16, 16, 16, __nv_bfloat16, col_major> bf;   // col_major => Kᵀ
-            fragment<accumulator, 16, 16, 16, float> cf;
-            fill_fragment(cf, 0.f);
-            #pragma unroll
-            for (int ks = 0; ks < KH; ks++) {
-                load_matrix_sync(af, s_q + ks * 16, HEAD_DIM);
-                load_matrix_sync(bf, kb + ks * 16, KVLD);
-                mma_sync(cf, af, bf, cf);
-            }
-            store_matrix_sync(s_s + warp * 16, cf, HEAD_DIM, mem_row_major);
-        }
-        __syncthreads();
-
-        // Online softmax. Column t -> global token gbase+t; valid iff in [start,end).
-        #pragma unroll
-        for (int rr = 0; rr < 2; rr++) {
-            const int r = warp * 2 + rr;
-            float mx = -1e30f;
-            for (int t = lane; t < gblk * 16; t += 32) {
-                const int gtok = gbase + t;
-                if (gtok >= start && gtok < end) mx = fmaxf(mx, s_s[r * HEAD_DIM + t] * scale);
-            }
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, o));
-            const float m_old = s_m[r], m_new = fmaxf(m_old, mx), corr = __expf(m_old - m_new);
-            float sum = 0.f;
-            for (int t = lane; t < 128; t += 32) {
-                float p = 0.f;
-                const int gtok = gbase + t;
-                if (t < gblk * 16 && gtok >= start && gtok < end) { p = __expf(s_s[r * HEAD_DIM + t] * scale - m_new); sum += p; }
-                s_p[r * HEAD_DIM + t] = __float2bfloat16(p);
-            }
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, o);
-            if (lane == 0) { s_m[r] = m_new; s_l[r] = s_l[r] * corr + sum; }
-            for (int c = lane; c < HEAD_DIM; c += 32) s_o[r * HEAD_DIM + c] *= corr;
-        }
-        __syncthreads();
-
-        // PV: warp w computes O[16 x 16] for head cols [warp*16,+16), K over the group's blocks.
-        {
-            fragment<accumulator, 16, 16, 16, float> cf;
-            fill_fragment(cf, 0.f);
-            for (int ks = 0; ks < gblk; ks++) {
-                const int pb = block_table[seq * max_blocks + first_blk + g0 + ks];
-                const __nv_bfloat16* vb = v_pool + ((size_t)pb * 16 * num_kv_heads + kvh) * HEAD_DIM + warp * 16;
-                fragment<matrix_a, 16, 16, 16, __nv_bfloat16, row_major> af;
-                fragment<matrix_b, 16, 16, 16, __nv_bfloat16, row_major> bf;
-                load_matrix_sync(af, s_p + ks * 16, HEAD_DIM);
-                load_matrix_sync(bf, vb, KVLD);
-                mma_sync(cf, af, bf, cf);
-            }
-            store_matrix_sync(s_s + warp * 16, cf, HEAD_DIM, mem_row_major);
-        }
-        __syncthreads();
-        for (int i = tid; i < 16 * HEAD_DIM; i += blockDim.x) s_o[i] += s_s[i];
-        __syncthreads();
-    }
-
-    for (int r = 0; r < GQA; r++) {
-        const int qh  = kvh * GQA + r;
-        const int idx = (seq * num_q_heads + qh) * n_splits + split;
-        if (tid == 0) { part_m[idx] = s_m[r]; part_l[idx] = s_l[r]; }
-        for (int c = tid; c < HEAD_DIM; c += blockDim.x)
-            part_acc[(size_t)idx * HEAD_DIM + c] = s_o[r * HEAD_DIM + c];
-    }
-}
-template __global__ void fa_split_gqa_mma_kernel<128, 8>(const __nv_bfloat16*, const __nv_bfloat16*,
-    const __nv_bfloat16*, const int*, const int*, float*, float*, float*, float, int, int, int, int, int);
-
-// int8 variant: K/V are int8 with one fp16 scale per (token, kv_head) head vector. Q is quantized
-// per-q-head and P (with the per-token V scale folded in) per-row, so QK and PV run on int8 tensor
-// cores (int32 accumulate); the per-token/per-head fp16 scales are applied to the int32 results.
-// Halves the KV global read (the bottleneck) and uses 2x-throughput int8 tensor cores.
+// Tensor-core (wmma int8) GQA flash-decode split for long context. The 8 GQA q-heads of a kv-head are
+// the batch (M) dim, so S = Q·Kᵀ and O = P·V become small matmuls on the tensor cores, replacing the
+// per-lane FMA + 5-shuffle fa_wsum reduction that dominates the scalar kernel at long context. K/V are
+// int8 with one fp16 scale per (token, kv_head) head vector. Q is quantized per-q-head and P (with the
+// per-token V scale folded in) per-row, so QK and PV run on int8 tensor cores (int32 accumulate); the
+// per-token/per-head fp16 scales are applied to the int32 results. This halves the KV global read (the
+// bottleneck) and uses 2x-throughput int8 tensor cores. M is padded 8->16; partials (m,l,acc) stay
+// byte-compatible with the combine kernel. sm_80+ (wmma). One block per (seq, kv_head, split); 8 warps.
 template <int HEAD_DIM, int GQA>
 __global__ void fa_split_gqa_mma_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const signed char* __restrict__ k_pool,
@@ -619,16 +492,17 @@ void launch_flash_decode_split(
         fagqa = e ? ((e[0] == '0') ? 0 : 1) : -2;   // -2 = auto: long-context only
     }
     const bool use_gqa = (fagqa == 1) || (fagqa == -2 && n_splits >= 32);
-    // Tensor-core (wmma bf16) GQA split (SPARKINFER_FAMMA, default on): the 8 GQA q-heads become the
-    // mma M dim, moving the QK/PV dot + reduction onto the tensor cores. The kernel reads each 16-token
-    // physical block's fragments straight from the paged pool, so it is only exact when every split's
-    // chunk is a multiple of block_size (16) — enabled only then; other contexts use the scalar kernel.
+    // Tensor-core (wmma int8) GQA split (SPARKINFER_FAMMA, default on): the 8 GQA q-heads become the
+    // mma M dim, moving the QK/PV dot + reduction onto the int8 tensor cores while halving the KV read.
+    // The kernel reads each 16-token physical block's fragments straight from the paged pool, so it is
+    // only exact when every split's chunk is a multiple of block_size (16), and it needs the int8 cache;
+    // otherwise the scalar split runs. bf16 (int8 off) always uses the scalar path (== main).
     static int famma = -1;
     if (famma < 0) { const char* e = getenv("SPARKINFER_FAMMA"); famma = (e && e[0] == '0') ? 0 : 1; }
     // Long-context regime only: requires block_size==16 (each warp maps to one physical block) AND a
     // large-enough per-split chunk (>=2 physical blocks). At tiny chunks the GQA-shared mma has too
     // few blocks/warps to fill the GPU and loses to the high-occupancy scalar split; those short
-    // contexts use the scalar (int8-dequant) path. Robust to any chunk (partial blocks masked).
+    // contexts use the scalar path. Robust to any chunk (partial blocks masked).
     const int mma_chunk = (n_splits > 0) ? (seqlen + n_splits - 1) / n_splits : 0;
     const bool mma_aligned = famma && seqlen > 512 && block_size == 16 && mma_chunk >= 32;
     const __half* ksc = reinterpret_cast<const __half*>(k_scale);
@@ -636,7 +510,7 @@ void launch_flash_decode_split(
     if (use_gqa && num_kv_heads > 0 && num_q_heads == num_kv_heads * 8) {
         constexpr int GQA = 8, TILE = FA_GQA_TILE;
         dim3 gq(num_kv_heads * n_splits, num_seqs);
-        if (mma_aligned && int8_kv) {   // int8 tensor-core (halved KV read)
+        if (mma_aligned && int8_kv) {   // int8 tensor-core (halved KV read) — the long-context win
             const size_t i8_smem = (size_t)2 * 16 * 128 * sizeof(signed char)
                                  + (size_t)2 * 16 * 128 * sizeof(float)
                                  + (size_t)(16 + 16 + 128 + 128 + 16 + 16) * sizeof(float);
@@ -645,19 +519,21 @@ void launch_flash_decode_split(
                 reinterpret_cast<const signed char*>(v_pool), block_table, seq_lens,
                 part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
                 ksc, vsc);
-        } else if (mma_aligned) {   // bf16 tensor-core; block-aligned chunks (paged-fragment loads exact)
-            constexpr size_t mma_smem = (size_t)(16 + 16) * 128 * sizeof(__nv_bfloat16)
-                                      + (size_t)(16 + 16) * 128 * sizeof(float) + 32 * sizeof(float);
-            fa_split_gqa_mma_kernel<128, GQA><<<gq, GQA * 32, mma_smem, stream>>>(
-                reinterpret_cast<const __nv_bfloat16*>(q), reinterpret_cast<const __nv_bfloat16*>(k_pool),
-                reinterpret_cast<const __nv_bfloat16*>(v_pool), block_table, seq_lens,
-                part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits);
         } else {
-        size_t smem = (size_t)2 * TILE * 128 * sizeof(__nv_bfloat16);
-        fa_split_gqa_kernel<128, GQA, TILE><<<gq, GQA * 32, smem, stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
-            part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
-            ksc, vsc, int8_kv);
+            // Scalar split. The bf16 instantiation is byte-identical to the pre-int8 (main) kernel, so the
+            // guard contexts (128/512/4k, int8 off) match main exactly; the int8 instantiation serves the
+            // forced-int8 short/unaligned path (accuracy gate) and never touches the bf16 codegen.
+            const size_t smem = (size_t)2 * TILE * 128 * sizeof(__nv_bfloat16);
+            if (int8_kv)
+                fa_split_gqa_kernel<128, GQA, TILE, true><<<gq, GQA * 32, smem, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
+                    part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
+                    ksc, vsc);
+            else
+                fa_split_gqa_kernel<128, GQA, TILE, false><<<gq, GQA * 32, smem, stream>>>(
+                    reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
+                    part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
+                    ksc, vsc);
         }
         fa_launch_combine_dispatch(part_m, part_l, part_acc, reinterpret_cast<__nv_bfloat16*>(out),
                                    num_q_heads, n_splits, reinterpret_cast<fa_block_q8_1*>(out_q8), num_seqs, stream);
