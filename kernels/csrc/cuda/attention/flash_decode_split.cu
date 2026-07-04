@@ -387,30 +387,37 @@ __global__ void fa_split_gqa_mma_i8_kernel(
             store_matrix_sync(reinterpret_cast<int*>(s_s) + warp * 16, cf, HEAD_DIM, mem_row_major);
         }
         __syncthreads();
-        for (int i = tid; i < 16 * 128; i += blockDim.x) {
-            const int m = i >> 7, col = i & 127;
-            if (col < gblk * 16) s_s[i] = (float)reinterpret_cast<int*>(s_s)[i] * s_qs[m] * s_ks[col];
-        }
-        __syncthreads();
+        // Read the raw int32 QK scores directly and apply the per-row/per-token scales inline in the
+        // softmax below — this deletes a full 16x128 shared int32->float round-trip and one
+        // __syncthreads per KV group (the flash-decode is latency-bound at high n_splits, so a barrier
+        // matters). Math is bit-identical: ((int * q_scale) * k_scale) * softmax_scale, same order.
+        const int* s_si = reinterpret_cast<const int*>(s_s);
 
         // Online softmax; fold V scale into P', quantize P' per-row into s_pi.
         #pragma unroll
         for (int rr = 0; rr < 2; rr++) {
             const int r = warp * 2 + rr;
-            float mx = -1e30f;
-            for (int t = lane; t < gblk * 16; t += 32) {
-                const int gtok = gbase + t;
-                if (gtok >= start && gtok < end) mx = fmaxf(mx, s_s[r * 128 + t] * scale);
+            // Cache this lane's 4 scaled QK scores (t = lane + u*32) once, reuse for max AND exp —
+            // avoids reading s_si + re-applying the 3 scales twice. Invalid/masked positions get the
+            // -inf sentinel so they drop out of the max and yield p=0 in the exp (no s_vs garbage read).
+            float sc[4], mx = -1e30f;
+            #pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int t = lane + u * 32, gtok = gbase + t;
+                sc[u] = (t < gblk * 16 && gtok >= start && gtok < end)
+                        ? (float)s_si[r * 128 + t] * s_qs[r] * s_ks[t] * scale : -1e30f;
+                mx = fmaxf(mx, sc[u]);
             }
             #pragma unroll
             for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, o));
             const float m_old = s_m[r], m_new = fmaxf(m_old, mx), corr = __expf(m_old - m_new);
             float sum = 0.f, pamax = 0.f;
-            for (int t = lane; t < 128; t += 32) {
+            #pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int t = lane + u * 32;
                 float pv = 0.f;
-                const int gtok = gbase + t;
-                if (t < gblk * 16 && gtok >= start && gtok < end) {
-                    const float p = __expf(s_s[r * 128 + t] * scale - m_new);
+                if (sc[u] > -1e29f) {
+                    const float p = __expf(sc[u] - m_new);
                     sum += p; pv = p * s_vs[t]; pamax = fmaxf(pamax, fabsf(pv));
                 }
                 s_s[r * 128 + t] = pv;   // stash P' (score no longer needed for this row)
@@ -419,7 +426,9 @@ __global__ void fa_split_gqa_mma_i8_kernel(
             for (int o = 16; o > 0; o >>= 1) { sum += __shfl_xor_sync(0xffffffff, sum, o); pamax = fmaxf(pamax, __shfl_xor_sync(0xffffffff, pamax, o)); }
             const float pd = pamax / 127.0f;
             if (lane == 0) { s_m[r] = m_new; s_l[r] = s_l[r] * corr + sum; s_ps[r] = pd; }
-            for (int t = lane; t < 128; t += 32)
+            // Only quantize the gblk*16 P' columns the PV mma actually reads (it loops ks < gblk);
+            // the tail columns are never loaded, so skipping them trims the per-row roundf work.
+            for (int t = lane; t < gblk * 16; t += 32)
                 s_pi[r * 128 + t] = (signed char)((pamax == 0.f) ? 0 : (int)roundf(s_s[r * 128 + t] / pd));
             for (int c = lane; c < HEAD_DIM; c += 32) s_o[r * HEAD_DIM + c] *= corr;
         }
@@ -441,7 +450,9 @@ __global__ void fa_split_gqa_mma_i8_kernel(
             store_matrix_sync(reinterpret_cast<int*>(s_s) + warp * 16, cf, HEAD_DIM, mem_row_major);
         }
         __syncthreads();
-        for (int i = tid; i < 16 * 128; i += blockDim.x) s_o[i] += (float)reinterpret_cast<int*>(s_s)[i] * s_ps[i >> 7];
+        // Only the GQA real q-head rows are kept (rows GQA..15 are wmma M-padding, never written to
+        // the partials) — accumulate just those, halving this thread-parallel epilogue at GQA=8.
+        for (int i = tid; i < GQA * 128; i += blockDim.x) s_o[i] += (float)reinterpret_cast<int*>(s_s)[i] * s_ps[i >> 7];
         __syncthreads();
     }
 
