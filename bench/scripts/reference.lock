@@ -10,7 +10,12 @@
 # An EMPTY value means "warn-only" (compute + log, don't enforce) — used until a value is pinned.
 
 # sha256 of the Q4_K_M GGUF baseline weights. Verified before every eval; mismatch -> re-download.
-MODEL_SHA256="0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5"
+# Env-overridable (`:-`) so the dual-model eval can pin a DIFFERENT sha per model — the Qwen3.6
+# primary passes QWEN36_MODEL_SHA256 (below); the Qwen3-30B guard uses this default.
+MODEL_SHA256="${MODEL_SHA256:-0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5}"
+
+# sha256 of the Qwen3.6-35B-A3B UD-Q4_K_M GGUF (unsloth) — the dual-eval primary baseline weights.
+QWEN36_MODEL_SHA256="ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61"
 
 # llama.cpp commit the reference is pinned to. HEAD of master drifts run-to-run (non-reproducible and
 # unpinnable); we check out exactly this commit, verify a clean tree, and rebuild if either differs.

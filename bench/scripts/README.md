@@ -85,5 +85,15 @@ build/runtime/qwen3_gguf_score model.gguf 20 <token-ids...>   # compare argmax +
 | `PREBUILT_TAG` | `latest` | newest matching prebuilt release; set a tag like `v0.2.0` to pin |
 | `PREBUILT_URL` | auto | override with an exact prebuilt tarball URL |
 
-Files: `bench.sh`, `accuracy.sh`, `accuracy_compare.py`, `eval_text.txt`, `_common.sh`.
+## Automatic PR evaluation
+
+`evaluate.sh` grades one submission (build → correctness → 128/512/4k/16k/32k speed → `label.py`).
+`evaluate_dual.sh` wraps it for **dual-model scoring**: it builds once, then scores **Qwen3.6-35B-A3B**
+(the primary target, 128/512/4k for now) and guards **Qwen3-30B-A3B** against regression (full sweep +
+accuracy) — any Qwen3 speed drop <98% of its main or broken llama.cpp parity REJECTs the submission.
+Each model uses its own `MODELS_DIR` (different tokenizers) and weight-sha pin (`reference.lock`).
+See [`eval/README.md`](../../eval/README.md) for the vast.ai orchestration and `--dual`.
+
+Files: `bench.sh`, `accuracy.sh`, `accuracy_compare.py`, `evaluate.sh`, `evaluate_dual.sh`, `label.py`,
+`eval_text.txt`, `reference.lock`, `_common.sh`.
 Results from reference runs live in [`../results/`](../results).

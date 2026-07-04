@@ -745,7 +745,23 @@ def main():
     ap.add_argument("--ceiling", type=float, default=0)
     ap.add_argument("--repo", default="gittensor-ai-lab/sparkinfer")
     ap.add_argument("--dry-run", action="store_true", help="evaluate + print, but don't label/comment")
+    # Dual-model: score Qwen3.6-35B-A3B (primary) and guard Qwen3-30B against no-regression. The
+    # Qwen3-30B guard baselines are still measured same-box each run (run_guard_*); the Qwen3.6
+    # primary baselines are stable config constants (no Qwen3.6-optimizing PR has moved them yet) —
+    # overridable via env until a same-box Qwen3.6 baseline pass is added.
+    ap.add_argument("--dual", action="store_true",
+                    help="score Qwen3.6 (primary) + guard Qwen3-30B (no-regression) via evaluate_dual.sh")
+    ap.add_argument("--primary-frontier", type=float,
+                    default=float(os.environ.get("SPARKINFER_QWEN36_FRONTIER", "23.0")),
+                    help="[--dual] Qwen3.6 current best verified 128/512/4k tok/s (the scored frontier)")
     args = ap.parse_args()
+    # Qwen3.6 same-box origin/main baselines (128/512/4k). Env-overridable; measured 2026-07 on RTX 5090.
+    QWEN36_BASE = {
+        "128": float(os.environ.get("SPARKINFER_QWEN36_128", "23.22")),
+        "512": float(os.environ.get("SPARKINFER_QWEN36_512", "23.16")),
+        "4k":  float(os.environ.get("SPARKINFER_QWEN36_4K",  "23.03")),
+        "llama128": float(os.environ.get("SPARKINFER_QWEN36_LLAMA_128", "190")),
+    }
 
     dash = load_dash()
     frontier = dash["status"]["frontier_tps"] if dash else args.frontier   # live ledger frontier
@@ -965,6 +981,14 @@ def main():
                "--guard-16k-baseline", str(run_guard_16k),
                "--guard-32k-baseline", str(run_guard_32k),
                "--keep"]            # keep instance alive — bot stops it after all PRs
+        if args.dual:
+            # Qwen3.6 scored (128/512/4k); the --guard-*-baseline above become the Qwen3-30B guard.
+            cmd[cmd.index("--keep"):cmd.index("--keep")] = [
+                "--dual", "--primary-frontier", str(args.primary_frontier),
+                "--p-guard-128-baseline", str(QWEN36_BASE["128"]),
+                "--p-guard-512-baseline", str(QWEN36_BASE["512"]),
+                "--p-guard-4k-baseline",  str(QWEN36_BASE["4k"]),
+                "--p-llama-128-baseline", str(QWEN36_BASE["llama128"])]
         if PINNED_INSTANCE and str(cur_iid) == PINNED_INSTANCE:
             cmd.append("--pinned")  # never destroy the pin; retry-then-fallback on bring-up failure
         pinned = "--pinned" in cmd

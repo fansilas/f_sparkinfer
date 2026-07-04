@@ -28,14 +28,21 @@ if [ -n "$REF" ] && [ -z "${SI_NO_CHECKOUT:-}" ]; then
 fi
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 
-echo ">> [1/3] build submission ($COMMIT) from source (sm_$ARCH) ..." >&2
-rm -rf "$ROOT/build"
-# A submission that does not compile is invalid -> clean REJECT (not an infra error). The `if !`
-# guard suppresses `set -e` for the build so we can emit a verdict instead of aborting silently.
-if ! NO_PREBUILT=1 ensure_sparkinfer "$ARCH"; then
-  echo ">> build FAILED — submission does not compile (sm_$ARCH)" >&2
-  printf 'RESULT_JSON {"commit": "%s", "tps": 0, "top1": 0, "kl": 99, "frontier_tps": %s, "label": "REJECT", "reason": "build failed (does not compile)", "pass": false}\n' "$COMMIT" "$FRONTIER"
-  exit 0
+# SI_SKIP_BUILD=1: the caller (evaluate_dual.sh) already built this exact tree from source and is
+# now scoring a second model against the same binaries — skip the rebuild so a two-model eval pays
+# the (model-agnostic) compile cost once, not twice.
+if [ -n "${SI_SKIP_BUILD:-}" ] && [ -x "$ROOT/build/runtime/qwen3_gguf_bench" ]; then
+  echo ">> [1/3] reusing pre-built submission ($COMMIT) (SI_SKIP_BUILD) ..." >&2
+else
+  echo ">> [1/3] build submission ($COMMIT) from source (sm_$ARCH) ..." >&2
+  rm -rf "$ROOT/build"
+  # A submission that does not compile is invalid -> clean REJECT (not an infra error). The `if !`
+  # guard suppresses `set -e` for the build so we can emit a verdict instead of aborting silently.
+  if ! NO_PREBUILT=1 ensure_sparkinfer "$ARCH"; then
+    echo ">> build FAILED — submission does not compile (sm_$ARCH)" >&2
+    printf 'RESULT_JSON {"commit": "%s", "tps": 0, "top1": 0, "kl": 99, "frontier_tps": %s, "label": "REJECT", "reason": "build failed (does not compile)", "pass": false}\n' "$COMMIT" "$FRONTIER"
+    exit 0
+  fi
 fi
 SI_BIN="$ROOT/build/runtime"; SI_LD=""
 
@@ -81,8 +88,9 @@ pin_clocks
 trap 'unpin_clocks' EXIT
 
 gclks=()
-median_ctx() {  # $1=context tokens, $2=repetitions
+median_ctx() {  # $1=context tokens, $2=repetitions ; reps<=0 SKIPS the context (returns 0, no run)
   local ctx="$1" reps="$2" vals=() t
+  [ "${reps:-0}" -le 0 ] && { echo 0; return; }
   for _ in $(seq 1 "$reps"); do
     t=$(si_run qwen3_gguf_bench "$GGUF" "$DECODE_TOKENS" "$ctx" 2>/dev/null |
         sed -n 's/.*decode tg *: *\([0-9.][0-9.]*\).*/\1/p' || true)
@@ -185,7 +193,9 @@ contexts = [
 ]
 for c in contexts:
     c["gain"] = 0.0 if c["base"] <= 0 else (c["tps"] - c["base"]) / c["base"]
-scorable = [c for c in contexts if c["base"] > 0]
+# A context measured with 0 reps (tps<=0) was intentionally skipped (e.g. Qwen3.6 runs only
+# 128/512/4k for now) — exclude it from scoring so a skipped context is never chosen or penalized.
+scorable = [c for c in contexts if c["base"] > 0 and c["tps"] > 0]
 chosen = max(scorable, key=lambda c: c["gain"]) if scorable else next(c for c in contexts if c["ctx"] == int("$SCORE_CTX"))
 print(json.dumps({"chosen": chosen, "contexts": contexts}, separators=(",", ":")))
 PY
@@ -223,7 +233,7 @@ PY
 )"
   CONTEXT_GAINS_JSON="$(SCORE_SELECT="$SCORE_SELECT" python3 - <<'PY'
 import json, os
-print(json.dumps({c["label"]: round(100*c["gain"], 2) for c in json.loads(os.environ["SCORE_SELECT"])["contexts"]}, separators=(",", ":")))
+print(json.dumps({c["label"]: round(100*c["gain"], 2) for c in json.loads(os.environ["SCORE_SELECT"])["contexts"] if c["tps"] > 0}, separators=(",", ":")))
 PY
 )"
   REGRESSION_LABELS_JSON="$(python3 - <<PY
