@@ -74,7 +74,7 @@ class LabelPolicyTest(unittest.TestCase):
             "eval_mode": "longctx",
             "score_context": 16384,
             "best_context_label": "16k-context",
-            "context_gains_pct": {"128-context": -2.04, "512-context": 1.25, "4k-context": 0.5, "16k-context": 20.0},
+            "context_gains_pct": {"128-context": -2.04, "512-context": 1.25, "4k-context": 0.5, "16k-context": 20.0, "32k-context": 12.5},
             "ctx_128_tps": 480.0,
             "ctx_512_tps": 405.0,
             "ctx_4096_tps": 198.0,
@@ -92,6 +92,9 @@ class LabelPolicyTest(unittest.TestCase):
             "guard_16k_baseline": 100.0,
             "guard_16k_ratio": 1.2,
             "guard_16k_pass": True,
+            "guard_32k_baseline": 71.11,
+            "guard_32k_ratio": 1.125,
+            "guard_32k_pass": True,
         }
         res = score(120.0, frontier=100.0, prov=prov)
         self.assertEqual(res["label"], "XL")
@@ -99,6 +102,7 @@ class LabelPolicyTest(unittest.TestCase):
         self.assertEqual(res["score_context"], 16384)
         self.assertEqual(res["best_context_label"], "16k-context")
         self.assertEqual(res["context_gains_pct"]["16k-context"], 20.0)
+        self.assertEqual(res["context_gains_pct"]["32k-context"], 12.5)
         self.assertEqual(res["ctx_128_tps"], 480.0)
         self.assertEqual(res["ctx_512_tps"], 405.0)
         self.assertEqual(res["ctx_4096_tps"], 198.0)
@@ -107,6 +111,7 @@ class LabelPolicyTest(unittest.TestCase):
         self.assertTrue(res["guard_512_pass"])
         self.assertTrue(res["guard_4k_pass"])
         self.assertTrue(res["guard_16k_pass"])
+        self.assertTrue(res["guard_32k_pass"])
 
     def test_baseline_label_when_no_frontier_exists(self):
         res = score(120.0, frontier=0.0)

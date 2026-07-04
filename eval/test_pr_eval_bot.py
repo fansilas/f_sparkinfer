@@ -19,6 +19,7 @@ class PrEvalBotPolicyTest(unittest.TestCase):
         self.assertIn("regression-512", bot.AUTOMERGE_BLOCK_LABELS)
         self.assertIn("regression-4k", bot.AUTOMERGE_BLOCK_LABELS)
         self.assertIn("regression-16k", bot.AUTOMERGE_BLOCK_LABELS)
+        self.assertIn("regression-32k", bot.AUTOMERGE_BLOCK_LABELS)
 
     def test_mixed_win_render_keeps_eval_label_and_shows_regression(self):
         res = {
@@ -45,12 +46,16 @@ class PrEvalBotPolicyTest(unittest.TestCase):
             "ctx_16384_tps": 266.0,
             "guard_16k_baseline": 265.0,
             "guard_16k_pass": True,
+            "ctx_32768_tps": 190.0,
+            "guard_32k_baseline": 194.0,
+            "guard_32k_pass": False,
             "regression_labels": ["regression-128"],
         }
         body = bot.render(res, "abc1234")
         self.assertIn("`eval:S`", body)
         self.assertIn("4096 ctx · 4k-context", body)
         self.assertIn("regression-128", body)
+        self.assertIn("32k-context no-regression gate", body)
         self.assertNotIn("Auto-closing", body)
 
     def test_auto_close_reject_render_explains_regression_only_case(self):
@@ -87,6 +92,7 @@ class PrEvalBotPolicyTest(unittest.TestCase):
                 {"ctx": 512, "label": "512", "sparkinfer_tps": 405.27, "llamacpp_decode_tps": 342.59},
                 {"ctx": 4096, "label": "4k", "sparkinfer_tps": 195.31, "llamacpp_decode_tps": 292.99},
                 {"ctx": 16384, "label": "16k", "sparkinfer_tps": 265.17, "llamacpp_decode_tps": 245.53},
+                {"ctx": 32768, "label": "32k", "sparkinfer_tps": 146.63, "llamacpp_decode_tps": 192.62},
             ],
             "prs": [{
                 "num": 136,
@@ -100,10 +106,12 @@ class PrEvalBotPolicyTest(unittest.TestCase):
                 "ctx_512_tps": 461.06,
                 "ctx_4096_tps": 348.86,
                 "ctx_16384_tps": 262.87,
+                "ctx_32768_tps": 149.0,
                 "guard_128_baseline": 481.59,
                 "guard_512_baseline": 405.36,
                 "guard_4k_baseline": 195.41,
                 "guard_16k_baseline": 262.88,
+                "guard_32k_baseline": 146.63,
             }],
             "landed": [],
             "landed_longctx": [],
@@ -125,6 +133,7 @@ class PrEvalBotPolicyTest(unittest.TestCase):
         self.assertEqual(out["status"]["frontier_tps"], 487.1)
         self.assertEqual(rows[4096]["sparkinfer_tps"], 348.68)
         self.assertEqual(rows[16384]["sparkinfer_tps"], 265.17)
+        self.assertEqual(rows[32768]["sparkinfer_tps"], 149.0)
         self.assertEqual(out["status"]["longctx_4k_tps"], 348.68)
         self.assertEqual(out["landed_longctx"][0]["ctx"], 4096)
         self.assertFalse(out["landed"])

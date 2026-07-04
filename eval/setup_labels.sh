@@ -20,13 +20,13 @@ done
 
 # UI-only: the context where the PR showed its strongest measured improvement. This does not affect
 # the eval score; label.py already computed the reward tier from the selected context.
-declare -A CC=( [128-context]=D14D72 [512-context]=7B5DFF [4k-context]=0E8A16 [16k-context]=B8860B )
+declare -A CC=( [128-context]=D14D72 [512-context]=7B5DFF [4k-context]=0E8A16 [16k-context]=B8860B [32k-context]=6F42C1 )
 for k in "${!CC[@]}"; do
   gh label create "$k" -R "$REPO" --color "${CC[$k]}" \
      --description "UI-only: strongest measured context in sparkinfer eval" --force >/dev/null
 done
 
-declare -A RC=( [regression-128]=F4A3A8 [regression-512]=E7828A [regression-4k]=D95D67 [regression-16k]=B60205 )
+declare -A RC=( [regression-128]=F4A3A8 [regression-512]=E7828A [regression-4k]=D95D67 [regression-16k]=B60205 [regression-32k]=6A1B9A )
 for k in "${!RC[@]}"; do
   gh label create "$k" -R "$REPO" --color "${RC[$k]}" \
      --description "sparkinfer eval regression marker for this context" --force >/dev/null

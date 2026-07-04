@@ -53,7 +53,7 @@ SN74 rewards verified speedups. The loop is intentionally tight:
 1. Pick a narrow bottleneck in the Blackwell decode path.
 2. Submit a PR with source changes and benchmark evidence.
 3. The bot builds `main` and the PR on the same RTX 5090.
-4. The bot checks correctness against llama.cpp and guards 128, 512, 4k, and 16k decode.
+4. The bot checks correctness against llama.cpp and guards 128, 512, 4k, 16k, and 32k decode.
 5. The strongest context improvement gets the score label; regressions get explicit `regression-*` labels.
 6. A maintainer merges the best frontier PR, and the dashboard updates the matching context chart.
 
@@ -69,7 +69,7 @@ with up to **1 Petaflop** FP4 AI performance.
 
 SPARKINFER solves this for local Blackwell AI:
 
-- **Fastest.** Frontier decode on RTX 5090 across 128, 512, 4k, and 16k context.
+- **Fastest.** Frontier decode on RTX 5090 across 128, 512, 4k, 16k, and 32k context.
 - **Smallest.** A native runtime binary measured in megabytes, not gigabytes.
 - **Power-optimized.** Built for consumer and edge GPUs where thermals and watts matter.
 - **SOTA-ready.** Designed to move quickly with new MoE models, quantization paths, and decode algorithms.
@@ -96,7 +96,7 @@ Your own model: `bench/scripts/bench.sh /path/to/model.gguf --tokens 256`. All o
 
 If you are contributing for SN74 rewards, start with the clear miner workflow:
 [`docs/miner-guide.md`](docs/miner-guide.md). It explains what scores, what gets
-rejected, how the 128 / 512 / 4k / 16k guards work, and the local commands to run
+rejected, how the 128 / 512 / 4k / 16k / 32k guards work, and the local commands to run
 before opening a PR.
 
 ## Layout & scoring
@@ -163,7 +163,7 @@ frozen llama.cpp reference. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Open a PR and a bot evaluates it automatically (polls every ~30 min). For each new commit it
 builds your branch **from source** on an RTX 5090, gates **correctness** (token-match / KL vs
-llama.cpp), checks that **128-token, 512-context, 4k-context, and 16k-context decode do not
+llama.cpp), checks that **128-token, 512-context, 4k-context, 16k-context, and 32k-context decode do not
 regress**, scores the **strongest verified context improvement**, and posts a comment with an
 **`eval:<label>`** verdict plus a UI-only context label such as `4k-context`:
 Mixed outcomes are explicit: a real >2% win in one context can score while regressions elsewhere

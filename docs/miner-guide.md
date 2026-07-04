@@ -22,6 +22,7 @@ The measured contexts are:
 | 512 | 512-context decode, 128 generated tokens |
 | 4k | 4k-context decode, 128 generated tokens |
 | 16k | 16k-context decode, 128 generated tokens |
+| 32k | 32k-context decode, 128 generated tokens |
 
 Small gains are not aggregated across contexts. For example, +1% at 128 and +1%
 at 4k is still not a scoring +2% improvement.
@@ -62,6 +63,7 @@ with context-specific labels:
 | `regression-512` | 512-context decode regressed |
 | `regression-4k` | 4k-context decode regressed |
 | `regression-16k` | 16k-context decode regressed |
+| `regression-32k` | 32k-context decode regressed |
 
 If no context improves by at least 2% and any guarded context regresses, the PR
 is rejected and may be auto-closed.
@@ -113,6 +115,7 @@ If your change targets long context, also record the context you expect to move:
 bench/scripts/bench.sh /path/to/model.gguf --ctx 512 --tokens 128
 bench/scripts/bench.sh /path/to/model.gguf --ctx 4096 --tokens 128
 bench/scripts/bench.sh /path/to/model.gguf --ctx 16384 --tokens 128
+bench/scripts/bench.sh /path/to/model.gguf --ctx 32768 --tokens 128
 ```
 
 ## PR Requirements
@@ -123,7 +126,7 @@ A good PR includes:
 - The files and kernels changed.
 - Local speed numbers, including GPU model and CUDA version.
 - Accuracy numbers or a clear statement that `accuracy.sh` passed.
-- Any expected context-specific effect: `128`, `512`, `4k`, or `16k`.
+- Any expected context-specific effect: `128`, `512`, `4k`, `16k`, or `32k`.
 
 Keep PRs narrow. A small kernel PR with a clear benchmark is easier to verify and
 merge than a broad rewrite.

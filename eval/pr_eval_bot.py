@@ -67,8 +67,8 @@ MERGE_FIRST_LABEL  = "merge-first"    # the round's biggest verified speedup —
 NEEDS_REBASE_LABEL = "needs-rebase"   # also a verified speedup, but not the round winner
 REEVALUATE_LABEL   = "re-evaluate"    # winner merged → rebase onto new main; bot re-evals on push
 HOLD_LABEL         = "hold"           # maintainer override: never auto-merge this PR
-CONTEXT_LABELS     = {"128-context", "512-context", "4k-context", "16k-context"}
-REGRESSION_LABELS  = {"regression-128", "regression-512", "regression-4k", "regression-16k"}
+CONTEXT_LABELS     = {"128-context", "512-context", "4k-context", "16k-context", "32k-context"}
+REGRESSION_LABELS  = {"regression-128", "regression-512", "regression-4k", "regression-16k", "regression-32k"}
 
 # Auto-merge the round's merge-first winner — OFF unless SPARKINFER_AUTOMERGE=1. Heavily guarded:
 # the eval only verifies speed + token-match, so auto-merge is gated on labels, author standing,
@@ -333,13 +333,16 @@ def render(res, oid):
         base = res.get("guard_16k_baseline") or res.get("frontier_tps") or 0
         rows.append(f"| 16k-context no-regression gate | {res.get('ctx_16384_tps')} tok/s"
                     f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
+    if res.get("ctx_32768_tps") is not None:
+        gate = "pass" if res.get("guard_32k_pass", True) else "fail"
+        base = res.get("guard_32k_baseline") or 0
+        rows.append(f"| 32k-context no-regression gate | {res.get('ctx_32768_tps')} tok/s"
+                    f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
     if res.get("ctx_2048_tps") is not None and res.get("ctx_512_tps") is None:
         gate = "pass" if res.get("guard_2k_pass", True) else "fail"
         base = res.get("guard_2k_baseline") or 0
         rows.append(f"| legacy 2k no-regression gate | {res.get('ctx_2048_tps')} tok/s"
                     f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
-    if res.get("ctx_32768_tps") is not None:
-        rows.append(f"| 32k telemetry | {res.get('ctx_32768_tps')} tok/s |")
     if res.get("regression_labels"):
         rows.append(f"| regressions | {', '.join(res.get('regression_labels') or [])} |")
     if "frontier_tps" in res and res["frontier_tps"]:
@@ -356,7 +359,7 @@ def render(res, oid):
                          f"(was {res.get('frontier_tps','?')}).")
     if label == "REJECT" and res.get("auto_close"):
         note = "No context cleared the 2% significance gate while at least one context regressed. Auto-closing this PR."
-    target_note = ("128/512/4k/16k guarded · strongest context scores"
+    target_note = ("128/512/4k/16k/32k guarded · strongest context scores"
                    if res.get("eval_mode") == "longctx" else "128-token decode frontier")
     return (f"<!-- sparkinfer-eval:{oid} -->\n"
             f"## {icon} sparkinfer auto-eval — `{oid}`\n\n"
@@ -371,10 +374,11 @@ DATA_JSON = os.path.join(DASH, "data.json")
 FRONTIER_LABELS = {"XL", "L", "M", "S", "XS", "BASELINE"}
 SPEEDUP_LABELS = {"XL", "L", "M", "S", "XS"}   # verified speedup over main (BASELINE excluded)
 CTX_SERIES = {
-    128:   {"metric": "ctx_128_tps",   "guard": "guard_128_baseline",  "status": "frontier_tps",     "label": "128"},
-    512:   {"metric": "ctx_512_tps",   "guard": "guard_512_baseline",  "status": "longctx_512_tps",  "label": "512"},
-    4096:  {"metric": "ctx_4096_tps",  "guard": "guard_4k_baseline",   "status": "longctx_4k_tps",   "label": "4k"},
-    16384: {"metric": "ctx_16384_tps", "guard": "guard_16k_baseline",  "status": "longctx_16k_tps",  "label": "16k"},
+    128:   {"metric": "ctx_128_tps",   "guard": "guard_128_baseline",  "status": "frontier_tps",     "label": "128", "color": "#D14D72", "llama": 365.85, "note": "128-token decode, no prefill context"},
+    512:   {"metric": "ctx_512_tps",   "guard": "guard_512_baseline",  "status": "longctx_512_tps",  "label": "512", "color": "#7B5DFF", "llama": 342.59, "note": "llama-batched-bench npp=512 ntg=128 npl=1"},
+    4096:  {"metric": "ctx_4096_tps",  "guard": "guard_4k_baseline",   "status": "longctx_4k_tps",   "label": "4k", "color": "#0E8A16", "llama": 292.99, "note": "llama-batched-bench npp=4096 ntg=128 npl=1"},
+    16384: {"metric": "ctx_16384_tps", "guard": "guard_16k_baseline",  "status": "longctx_16k_tps",  "label": "16k", "color": "#B8860B", "llama": 245.53, "note": "llama-batched-bench npp=16384 ntg=128 npl=1"},
+    32768: {"metric": "ctx_32768_tps", "guard": "guard_32k_baseline",  "status": "longctx_32k_tps",  "label": "32k", "color": "#6F42C1", "llama": 192.62, "note": "release-log llama.cpp estimate at 32k, ntg=128"},
 }
 
 def load_dash():
@@ -442,6 +446,9 @@ def upload_eval_log(repo, num, title, oid, res, log_text, baseline):
                   "guard_16k_baseline": res.get("guard_16k_baseline"),
                   "guard_16k_ratio": res.get("guard_16k_ratio"),
                   "guard_16k_pass": res.get("guard_16k_pass"),
+                  "guard_32k_baseline": res.get("guard_32k_baseline"),
+                  "guard_32k_ratio": res.get("guard_32k_ratio"),
+                  "guard_32k_pass": res.get("guard_32k_pass"),
                   "guard_2k_baseline": res.get("guard_2k_baseline"),
                   "guard_2k_ratio": res.get("guard_2k_ratio"),
                   "guard_2k_pass": res.get("guard_2k_pass"),
@@ -491,6 +498,7 @@ def update_dashboard(repo, pr, areas, res, proof_url=None):
               "guard_512_baseline", "guard_512_ratio", "guard_512_pass",
               "guard_4k_baseline", "guard_4k_ratio", "guard_4k_pass",
               "guard_16k_baseline", "guard_16k_ratio", "guard_16k_pass",
+              "guard_32k_baseline", "guard_32k_ratio", "guard_32k_pass",
               "guard_2k_baseline", "guard_2k_ratio", "guard_2k_pass"):
         if res.get(k) is not None:
             entry[k] = res.get(k)
@@ -539,7 +547,9 @@ def _upsert_context_baselines(data, e):
                 row["sparkinfer_tps"] = new
                 changed[ctx] = new
         else:
-            rows.append({"ctx": ctx, "label": meta["label"], "tokens": 128, "sparkinfer_tps": new})
+            rows.append({"ctx": ctx, "label": meta["label"], "color": meta["color"], "tokens": 128,
+                         "sparkinfer_tps": new, "llamacpp_decode_tps": meta["llama"],
+                         "llamacpp_note": meta["note"]})
             changed[ctx] = new
         if data.get("status") is not None:
             cur = data["status"].get(meta["status"])
@@ -556,7 +566,7 @@ def record_merge(repo, num):
     if data is None: return
     e = next((p for p in data.get("prs", []) if p.get("num") == num), None)
     if not e or e.get("label") not in SPEEDUP_LABELS: return                 # only verified speedups
-    if e.get("eval_mode") == "longctx" and int(e.get("score_context") or 0) in (512, 4096, 16384):
+    if e.get("eval_mode") == "longctx" and int(e.get("score_context") or 0) in (512, 4096, 16384, 32768):
         if any(m.get("pr") == num for m in data.get("landed_longctx", [])): return
         score_ctx = int(e.get("score_context") or 0)
         old_f = round((next((r.get("sparkinfer_tps") for r in data.get("context_baselines", [])
@@ -904,13 +914,15 @@ def main():
     run_guard_512 = float(bres.get("ctx_512_tps") or 0)
     run_guard_4k = float(bres.get("ctx_4096_tps") or 0)
     run_guard_16k = float(bres.get("ctx_16384_tps") or bres.get("tps") or 0)
+    run_guard_32k = float(bres.get("ctx_32768_tps") or 0)
     score_ctx = int(bres.get("score_context") or 128)
     if score_ctx == 128:
         print(f">> same-box baseline: origin/main = {run_baseline} tok/s on this box")
     else:
         print(f">> same-box baseline: origin/main contexts: "
               f"128={run_guard_128} tok/s; 512={run_guard_512} tok/s; "
-              f"4k={run_guard_4k} tok/s; 16k={run_guard_16k} tok/s")
+              f"4k={run_guard_4k} tok/s; 16k={run_guard_16k} tok/s; "
+              f"32k={run_guard_32k} tok/s")
     # Sanity guard: origin/main IS the merged frontier code, so on a healthy box it should measure
     # within ~10% of the known frontier. A baseline well below that means the box is cold/throttling
     # or degraded — grading PRs against it inflates every delta (the cold-clock artifact that once
@@ -945,6 +957,7 @@ def main():
                "--guard-512-baseline", str(run_guard_512),
                "--guard-4k-baseline", str(run_guard_4k),
                "--guard-16k-baseline", str(run_guard_16k),
+               "--guard-32k-baseline", str(run_guard_32k),
                "--keep"]            # keep instance alive — bot stops it after all PRs
         if PINNED_INSTANCE and str(cur_iid) == PINNED_INSTANCE:
             cmd.append("--pinned")  # never destroy the pin; retry-then-fallback on bring-up failure

@@ -367,7 +367,7 @@
         </div>`
       }).join("")}
     </div>
-    <div class="ctx-note">128 / 512 / 4k / 16k context baselines · 128 generated tokens · same RTX 5090 · same Q4_K_M model</div>` : "";
+    <div class="ctx-note">${ctxRows.map(x=>x.label).join(" / ")} context baselines · 128 generated tokens · same RTX 5090 · same Q4_K_M model</div>` : "";
   $("compare").innerHTML = ctxHtml;
 
   $("labels").innerHTML = D.labels.map(x=>`<span class="lg"><span class="dot" style="background:${x.c}"></span><b style="color:var(--title)">${x.l}</b> — ${x.d}</span>`).join("");
