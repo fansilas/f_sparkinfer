@@ -192,6 +192,13 @@ contexts = [
   {"ctx":32768, "label":"32k-context", "tps":float("$GUARD_32K_TPS"), "base":float("$GUARD_32K_BASELINE"), "llama":float("$LLAMA_32K_BASELINE")},
 ]
 for c in contexts:
+    # The scored frontier (--frontier) is the advanceable best; the regression guard baseline
+    # is a fixed same-box origin/main number. For the gain computation, use whichever is higher
+    # so a PR is always scored against the current frontier, never against a stale 23-tok/s
+    # baseline from before any optimization landed. Without this, a model's first big PR sets
+    # the real frontier but every subsequent PR re-scores against the cold-start baseline.
+    if float("$FRONTIER") > 0 and float("$FRONTIER") > c["base"]:
+        c["base"] = float("$FRONTIER")
     c["gain"] = 0.0 if c["base"] <= 0 else (c["tps"] - c["base"]) / c["base"]
 # A context measured with 0 reps (tps<=0) was intentionally skipped (e.g. Qwen3.6 runs only
 # 128/512/4k for now) — exclude it from scoring so a skipped context is never chosen or penalized.
