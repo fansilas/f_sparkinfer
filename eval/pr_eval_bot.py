@@ -1087,10 +1087,8 @@ def main():
         if res:
             proof = upload_eval_log(args.repo, num, pr.get("title", ""), oid, res, r.stdout + r.stderr, run_baseline)
             update_dashboard(args.repo, pr, areas, res, proof_url=proof)
-            if res.get("auto_close"):
-                gh(["pr", "close", str(num), "-R", args.repo,
-                    "--comment", "Auto-closed by sparkinfer eval: no single context cleared the 2% improvement gate and at least one context regressed."])
-                print(f"PR #{num}: auto-closed after regression-only eval reject.")
+            # auto-close on REJECT is DISABLED — merge-first is the only automated action.
+            # Rejected PRs stay open so authors can rebase and re-submit.
         # NB: run_baseline is NOT ratcheted here — every PR is graded against merged origin/main, so
         # independent optimizations each get their true gain (the frontier advances on MERGE, not eval).
 
