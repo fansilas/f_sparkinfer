@@ -150,6 +150,8 @@ struct Qwen35Model::Impl {
                            // next layer's standalone QKV-input quantize node. =0 disables
     bool use_gdn_pipe = true;   // default ON: overlap GDN gate/scalar projections on side streams. =0 disables
     bool use_shexp_pipe = true; // default ON: overlap shared expert with routed MoE. =0 disables
+    bool use_addnorm3 = true;   // default ON: fold the per-layer routed+shared residual_add into the
+                                // post-MoE add_rmsnorm (one fewer graph node/layer). =0 disables
 
     template <class T> T* alloc(size_t n) { void* p=nullptr; cu(cudaMalloc(&p, n*sizeof(T)), "malloc"); return (T*)p; }
 };
@@ -248,6 +250,7 @@ Qwen35Model::Qwen35Model(const Qwen35Config& cfg, KVCacheManager* kv, moe::MoEEn
     if (const char* e = getenv("SPARKINFER_ATTNIN")) p_->use_attnin = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_GDN_PIPE")) p_->use_gdn_pipe = !(e[0] == '0');
     if (const char* e = getenv("SPARKINFER_SHEXP_PIPE")) p_->use_shexp_pipe = !(e[0] == '0');
+    if (const char* e = getenv("SPARKINFER_ADDNORM3")) p_->use_addnorm3 = !(e[0] == '0');
 }
 
 Qwen35Model::~Qwen35Model() {
@@ -611,15 +614,23 @@ int Qwen35Model::forward_token(int token_id, int position) {
             s.engine->set_layer_weights(L, {w.router_w, w.gate, w.up, w.down});
             s.engine->forward(s.hn, s.routed, 1, L, st);
         }
+        const void* shared_to_fold = nullptr;   // if set, folded into the post-MoE add_rmsnorm3
         if (c.n_shared > 0) {
             if (shexp_pipelined) {
                 cudaStreamWaitEvent(st, s.ev_sx_done, 0);
-                launch_residual_add(s.routed, s.shared, s.routed, H, st);
                 const void* nextnorm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
-                if (fnq)
-                    kernels::launch_add_rmsnorm2_q8(s.h, s.routed, nextnorm, s.x, s.xn, s.aq81, H, c.rms_eps, st);
-                else
-                    kernels::launch_add_rmsnorm2(s.h, s.routed, nextnorm, s.x, s.xn, 1, H, c.rms_eps, st);
+                if (s.use_addnorm3) {   // x = h + (routed + shared) in one kernel; residual_add node dropped
+                    if (fnq)
+                        kernels::launch_add_rmsnorm3_q8(s.h, s.routed, s.shared, nextnorm, s.x, s.xn, s.aq81, H, c.rms_eps, st);
+                    else
+                        kernels::launch_add_rmsnorm3(s.h, s.routed, s.shared, nextnorm, s.x, s.xn, 1, H, c.rms_eps, st);
+                } else {
+                    launch_residual_add(s.routed, s.shared, s.routed, H, st);
+                    if (fnq)
+                        kernels::launch_add_rmsnorm2_q8(s.h, s.routed, nextnorm, s.x, s.xn, s.aq81, H, c.rms_eps, st);
+                    else
+                        kernels::launch_add_rmsnorm2(s.h, s.routed, nextnorm, s.x, s.xn, 1, H, c.rms_eps, st);
+                }
                 continue;
             }
             if (w.shared_gate_inp) {
@@ -665,11 +676,17 @@ int Qwen35Model::forward_token(int token_id, int position) {
                                                s.d_shared_ids, s.d_shared_w, s.shared,
                                                1, 1, 1, H, c.moe_ffn, st);
             }
-            launch_residual_add(s.routed, s.shared, s.routed, H, st);
+            if (s.use_addnorm3) shared_to_fold = s.shared;   // fold routed+shared into the norm below
+            else launch_residual_add(s.routed, s.shared, s.routed, H, st);
         }
-        // fused: x = h + routed ; xn = RMSNorm(x, next input_norm or final_norm)
+        // fused: x = h + routed (+ shared, when folded) ; xn = RMSNorm(x, next input_norm or final_norm)
         const void* nextnorm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
-        if (fnq)
+        if (shared_to_fold) {
+            if (fnq)
+                kernels::launch_add_rmsnorm3_q8(s.h, s.routed, shared_to_fold, nextnorm, s.x, s.xn, s.aq81, H, c.rms_eps, st);
+            else
+                kernels::launch_add_rmsnorm3(s.h, s.routed, shared_to_fold, nextnorm, s.x, s.xn, 1, H, c.rms_eps, st);
+        } else if (fnq)
             kernels::launch_add_rmsnorm2_q8(s.h, s.routed, nextnorm, s.x, s.xn, s.aq81, H, c.rms_eps, st);
         else
             kernels::launch_add_rmsnorm2(s.h, s.routed, nextnorm, s.x, s.xn, 1, H, c.rms_eps, st);
