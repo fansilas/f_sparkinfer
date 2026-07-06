@@ -236,8 +236,8 @@
   </section>
 
   <section>
-    <div class="sec-h"><h2>vs llama.cpp</h2><span class="hint">same GPU · same GGUF</span></div>
-    <div class="card cmp" id="compare"></div>
+    <div class="sec-h"><h2>Qwen3.6 vs llama.cpp</h2><span class="hint">same GPU · same GGUF · Qwen3.6-35B-A3B UD-Q4_K_M</span></div>
+    <div class="card cmp" id="compare36"></div>
   </section>
 
   <section>
@@ -336,37 +336,37 @@
       legItem("#0E8A16","landed / eval frontier · RTX 5090")));
   })();
 
-  const ctxRows = (D.context_baselines||[]).filter(x=>x.sparkinfer_tps && x.llamacpp_decode_tps);
-  const ctxMax = Math.max(1, ...ctxRows.flatMap(x=>[x.sparkinfer_tps, x.llamacpp_decode_tps]));
-  const ctxHtml = ctxRows.length ? `
+  const q36ctx = (D.qwen36?.ctx||[]).filter(x=>x.tps && x.ref_tps);
+  const q36Max = Math.max(1, ...q36ctx.flatMap(x=>[x.tps, x.ref_tps]));
+  const q36Html = q36ctx.length ? `
     <div class="cmp-grid">
-      ${ctxRows.map(x=>{
-        const d=100*(x.sparkinfer_tps-x.llamacpp_decode_tps)/x.llamacpp_decode_tps;
-        const title=x.ctx===128 ? "128-token decode" : `${x.label}-context decode`;
-        const sub=x.ctx===128 ? "no prefill context" : "128 generated tokens";
+      ${q36ctx.map(x=>{
+        const d=100*(x.tps-x.ref_tps)/x.ref_tps;
+        const title=x.label==="128" ? "128-token decode" : `${x.label}-context decode`;
+        const sub=x.label==="128" ? "no prefill context" : "128 generated tokens";
         return `<div class="cmp-card">
           <div class="cmp-top">
             <div><div class="cmp-title">${title}</div><div class="cmp-sub">${sub}</div></div>
-            <div class="cmp-delta ${d<0?'neg':''}">${d>=0?'+':''}${d.toFixed(1)}%</div>
+            <div class="cmp-delta neg">${d.toFixed(1)}%</div>
           </div>
           <div class="cmp-metric">
             <div class="cmp-name"><span class="cmp-dot" style="background:${x.color}"></span>sparkinfer</div>
-            <div class="cmp-val">${x.sparkinfer_tps} <span>tok/s</span></div>
+            <div class="cmp-val">${x.tps} <span>tok/s</span></div>
           </div>
           <div class="cmp-metric">
-            <div class="cmp-name"><span class="cmp-dot" style="background:#2a2540"></span>${s.ref_name} <span style="text-transform:none;letter-spacing:0;font-weight:500">baseline</span></div>
-            <div class="cmp-val">${x.llamacpp_decode_tps} <span>tok/s</span></div>
+            <div class="cmp-name"><span class="cmp-dot" style="background:#2a2540"></span>llama.cpp baseline</div>
+            <div class="cmp-val">${x.ref_tps} <span>tok/s</span></div>
           </div>
         </div>`
       }).join("")}
     </div>
     <div class="cmp-bars">
-      ${ctxRows.map(x=>{
-        const d=100*(x.sparkinfer_tps-x.llamacpp_decode_tps)/x.llamacpp_decode_tps;
-        const title=x.ctx===128 ? "128-token decode" : `${x.label}-context decode`;
-        const sub=x.ctx===128 ? "no prefill context" : "128 generated tokens";
-        const spW=Math.max(3, 100*x.sparkinfer_tps/ctxMax);
-        const refW=Math.max(3, 100*x.llamacpp_decode_tps/ctxMax);
+      ${q36ctx.map(x=>{
+        const d=100*(x.tps-x.ref_tps)/x.ref_tps;
+        const title=x.label==="128" ? "128-token decode" : `${x.label}-context decode`;
+        const sub=x.label==="128" ? "no prefill context" : "128 generated tokens";
+        const spW=Math.max(3, 100*x.tps/q36Max);
+        const refW=Math.max(3, 100*x.ref_tps/q36Max);
         return `<div class="cmp-bar-row">
           <div class="cmp-bar-label">
             <div class="cmp-bar-title">${title}</div>
@@ -376,20 +376,20 @@
             <div class="cmp-bar-line">
               <div class="cmp-bar-name">sparkinfer</div>
               <div class="cmp-bar-track"><div class="cmp-bar-fill" style="width:${spW}%"></div></div>
-              <div class="cmp-bar-val">${x.sparkinfer_tps}</div>
+              <div class="cmp-bar-val">${x.tps}</div>
             </div>
             <div class="cmp-bar-line">
-              <div class="cmp-bar-name">${s.ref_name}</div>
+              <div class="cmp-bar-name">llama.cpp</div>
               <div class="cmp-bar-track"><div class="cmp-bar-fill ref" style="width:${refW}%"></div></div>
-              <div class="cmp-bar-val">${x.llamacpp_decode_tps}</div>
+              <div class="cmp-bar-val">${x.ref_tps}</div>
             </div>
           </div>
-          <div class="cmp-bar-delta ${d<0?'neg':''}">${d>=0?'+':''}${d.toFixed(1)}%</div>
+          <div class="cmp-bar-delta neg">${d.toFixed(1)}%</div>
         </div>`
       }).join("")}
     </div>
-    <div class="ctx-note">${ctxRows.map(x=>x.label).join(" / ")} context baselines · 128 generated tokens · same RTX 5090 · same Q4_K_M model</div>` : "";
-  $("compare").innerHTML = ctxHtml;
+    <div class="ctx-note">128 / 512 / 4k context · 128 generated tokens · same RTX 5090 · same Qwen3.6-35B-A3B UD-Q4_K_M model</div>` : "";
+  $("compare36").innerHTML = q36Html;
 
   $("labels").innerHTML = D.labels.map(x=>`<span class="lg"><span class="dot" style="background:${x.c}"></span><b style="color:var(--title)">${x.l}</b> — ${x.d}</span>`).join("");
 
