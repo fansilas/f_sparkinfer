@@ -18,6 +18,8 @@ import argparse, datetime, hashlib, json, os, re, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+from ssh_box import ssh_box_enabled, ssh_box_endpoint, ssh_box_arg, vast_enabled
+
 # Reuse vast_eval's SSH plumbing for the Qwen3.6 baseline bench (same box, same keys).
 # The bot shells out to vast_eval for the full accuracy-gated Qwen3-30B baseline, but
 # the Qwen3.6 primary only needs a speed sweep — a direct SSH bench is faster.
@@ -57,8 +59,15 @@ def _write_pin(iid):
     try:
         with open(PIN_FILE, "w") as f: f.write(str(iid))
     except Exception: pass
-PINNED_INSTANCE = _read_pin()
+PINNED_INSTANCE = _read_pin() if not ssh_box_enabled() else ""
 PINNED_RETRY_RC = 75   # must match vast_eval.PINNED_RETRY_RC
+
+
+def _vast_eval_transport_args(instance_id):
+    """Return CLI args for vast_eval.py: either --ssh or --reuse."""
+    if ssh_box_enabled():
+        return ["--ssh", ssh_box_arg()]
+    return ["--reuse", str(current_instance(instance_id))]
 
 # Subsystem buckets for the deterministic area:<name> label (from a PR's top-level changed
 # dirs — no AI). Categorization/display only: SN74 scoring is speedup-only (the eval:* tier),
@@ -827,7 +836,8 @@ def reconcile_merge_labels(repo):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance", type=int, required=True, help="vast.ai instance id to reuse")
+    ap.add_argument("--instance", type=int, default=0,
+                    help="vast.ai instance id (EVAL_TRANSPORT=vast only; ignored for ssh)")
     ap.add_argument("--frontier", type=float, default=0, help="DEPRECATED: scoring now uses same-box origin/main baseline")
     ap.add_argument("--ceiling", type=float, default=0)
     ap.add_argument("--repo", default="gittensor-ai-lab/sparkinfer")
@@ -840,6 +850,13 @@ def main():
     ap.add_argument("--polaris", action="store_true",
                     help="generate a Polaris verifiable receipt for each eval")
     args = ap.parse_args()
+    if not ssh_box_enabled() and not args.instance:
+        ap.error("--instance is required for vast.ai transport (or set EVAL_TRANSPORT=ssh + EVAL_SSH_HOST)")
+    if ssh_box_enabled():
+        h, p = ssh_box_endpoint()
+        print(f">> eval transport: fixed SSH root@{h}:{p} (EVAL_TRANSPORT=ssh, vast.ai disabled)")
+    elif vast_enabled():
+        print(f">> eval transport: vast.ai (instance {args.instance or current_instance(0)})")
     # Qwen3.6 same-box origin/main baselines (128/512/4k). Env-overridable; measured 2026-07 on RTX 5090.
     QWEN36_BASE = {
         "128": float(os.environ.get("SPARKINFER_QWEN36_128", "300.16")),
@@ -1044,22 +1061,20 @@ def main():
         print("--- dry-run: would evaluate (oldest-first): " +
               ", ".join(f"#{n}" for _, n, *_ in pending)); return
 
-    # Reuse the pinned stable box first (cached model, good download speed). Reset the pointer to it
-    # at the start of each run so the pin is always tried before any fallback box left from a prior run.
-    if PINNED_INSTANCE:
+    # Reuse the pinned stable box first (cached model, good download speed). Skip when on bare metal.
+    if PINNED_INSTANCE and not ssh_box_enabled():
         with open(INSTANCE_FILE, "w") as f: f.write(PINNED_INSTANCE)
 
     # --- Same-box baseline -------------------------------------------------------------------------
-    # vast boxes vary in speed, so comparing a PR's tok/s against a frontier measured on a DIFFERENT
-    # box leaks hardware variance into the delta. Build+bench origin/main on THIS box first and grade
-    # every PR against that same-box number (+ any PR that lands earlier in this run). Measured ONCE
-    # per run, not per PR — otherwise two PRs targeting the same optimization could both "beat" main.
-    base_iid = current_instance(args.instance)
-    bcmd = [sys.executable, os.path.join(HERE, "vast_eval.py"), "--reuse", str(base_iid),
+    base_iid = current_instance(args.instance) if args.instance else 0
+    bcmd = [sys.executable, os.path.join(HERE, "vast_eval.py"),
+            *_vast_eval_transport_args(args.instance),
             "--ref", "origin/main", "--frontier", "0", "--ceiling", str(args.ceiling),
             "--eval-mode", "longctx", "--keep"]
-    if PINNED_INSTANCE and str(base_iid) == PINNED_INSTANCE: bcmd.append("--pinned")
-    print(f">> measuring same-box baseline (origin/main) on instance {base_iid} ...")
+    if PINNED_INSTANCE and not ssh_box_enabled() and str(base_iid) == PINNED_INSTANCE:
+        bcmd.append("--pinned")
+    box_label = ssh_box_arg() if ssh_box_enabled() else f"instance {base_iid}"
+    print(f">> measuring same-box baseline (origin/main) on {box_label} ...")
     br = subprocess.run(bcmd, cwd=ROOT, capture_output=True, text=True, timeout=14400)
     if br.returncode == PINNED_RETRY_RC:
         tail = next((l for l in reversed((br.stdout + br.stderr).splitlines()) if l.strip()), "")
@@ -1108,12 +1123,18 @@ def main():
 
     # Dual mode: bench Qwen3.6 main directly on the box — the same build the Qwen3-30B
     # baseline already verified. No accuracy gate, just a 3-context decode sweep.
-    if args.dual and _vast_sh and _vast_endpoint and _vast_info_of:
-        import vastai
-        v = vastai.VastAI()
-        info = _vast_info_of(v, base_iid)
-        if info:
-            host, port = _vast_endpoint(info)
+    if args.dual and _vast_sh:
+        ssh_ep = ssh_box_endpoint()
+        if ssh_ep:
+            host, port = ssh_ep
+        elif _vast_endpoint and _vast_info_of:
+            import vastai
+            v = vastai.VastAI()
+            info = _vast_info_of(v, base_iid)
+            host, port = _vast_endpoint(info) if info else (None, None)
+        else:
+            host = port = None
+        if host and port:
             M36 = "/workspace/models36/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
             B36 = "/root/sparkinfer/build/runtime/qwen3_gguf_bench"
             tps128 = tps512 = tps4k = 0.0
@@ -1135,7 +1156,7 @@ def main():
             else:
                 print(f"  Qwen3.6 bench failed — using defaults: {QWEN36_BASE['128']}/{QWEN36_BASE['512']}/{QWEN36_BASE['4k']}")
         else:
-            print(f"  could not get endpoint for instance {base_iid} — using config defaults")
+            print(f"  could not reach eval box for Qwen3.6 bench — using config defaults")
 
     # Run all pending evals on the SAME instance: pass --keep so vast_eval.py never stops/destroys
     # the box mid-queue. The bot stops the instance once after ALL PRs finish (or if the instance
@@ -1148,16 +1169,17 @@ def main():
         # optimizations STACK, re-evaluate the second after merging the first. Literal duplicates are
         # caught by copycat detection; emission only pays MERGED PRs, so the maintainer's merge choice
         # (not eval order) decides what counts.
-        cur_iid = current_instance(args.instance)
+        cur_iid = current_instance(args.instance) if args.instance else 0
         cmd = [sys.executable, os.path.join(HERE, "vast_eval.py"),
-               "--reuse", str(cur_iid), "--ref", ref,
+               *_vast_eval_transport_args(args.instance),
+               "--ref", ref,
                "--frontier", "0", "--ceiling", str(args.ceiling),
                "--eval-mode", "longctx", "--guard-128-baseline", str(run_guard_128),
                "--guard-512-baseline", str(run_guard_512),
                "--guard-4k-baseline", str(run_guard_4k),
                "--guard-16k-baseline", str(run_guard_16k),
                "--guard-32k-baseline", str(run_guard_32k),
-               "--keep"]            # keep instance alive — bot stops it after all PRs
+               "--keep"]
         if args.dual:
             # Qwen3.6 scored (128/512/4k); the --guard-*-baseline above become the Qwen3-30B guard.
             # Scoring base = same-box origin/main baseline (the guard baselines), not a passed-in frontier.
@@ -1169,13 +1191,14 @@ def main():
                 "--p-llama-128-baseline", str(QWEN36_BASE["llama128"]),
                 "--p-llama-512-baseline", str(QWEN36_BASE["llama512"]),
                 "--p-llama-4k-baseline",  str(QWEN36_BASE["llama4k"])]
-        if PINNED_INSTANCE and str(cur_iid) == PINNED_INSTANCE:
+        if PINNED_INSTANCE and not ssh_box_enabled() and str(cur_iid) == PINNED_INSTANCE:
             cmd.append("--pinned")  # never destroy the pin; retry-then-fallback on bring-up failure
         if args.polaris:
             cmd.insert(cmd.index("--keep"), "--polaris")
         pinned = "--pinned" in cmd
-        print(f"PR #{num} @ {oid}: evaluating '{ref}' (vs same-box main) on instance "
-              f"{cur_iid}{' [pinned]' if pinned else ''} ...")
+        box_label = ssh_box_arg() if ssh_box_enabled() else f"instance {cur_iid}"
+        print(f"PR #{num} @ {oid}: evaluating '{ref}' (vs same-box main) on {box_label}"
+              f"{' [pinned]' if pinned else ''} ...")
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=14400)
         if r.returncode == PINNED_RETRY_RC:
             tail = next((l for l in reversed((r.stdout + r.stderr).splitlines()) if l.strip()), "")
@@ -1281,11 +1304,12 @@ def main():
     if not args.dry_run:
         reconcile_merge_labels(args.repo)
 
-    # Stop (not destroy) the instance after all PRs — disk/model cache persists for next run.
-    final_iid = current_instance(args.instance)
-    if final_iid:
-        print(f">> stopping instance {final_iid} — model cache persists for next run")
-        subprocess.run(["vastai", "stop", "instance", str(final_iid)], capture_output=True)
+    # Stop vast instance after all PRs (bare-metal SSH boxes are left running).
+    if not ssh_box_enabled():
+        final_iid = current_instance(args.instance)
+        if final_iid:
+            print(f">> stopping instance {final_iid} — model cache persists for next run")
+            subprocess.run(["vastai", "stop", "instance", str(final_iid)], capture_output=True)
     print("done — no merges (manual).")
 
 if __name__ == "__main__":

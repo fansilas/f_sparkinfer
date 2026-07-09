@@ -7,20 +7,20 @@ bench/scripts/label.py (deterministic) — this script only orchestrates.
   # reuse an existing box (started if stopped, STOPPED again after the eval — the default):
   python eval/vast_eval.py --reuse 42134865 --frontier 164 --ceiling 366 --ref main
 
-  # evaluate then DESTROY (frees the disk too), or --keep to leave it running:
-  python eval/vast_eval.py --ref <git-ref> --frontier 164 --ceiling 366 --destroy
+  # fixed SSH box (EVAL_TRANSPORT=ssh — does not rent from vast.ai):
+  python eval/vast_eval.py --ssh 91.224.44.227:50200 --frontier 164 --ceiling 366 --ref main
 
-By default the instance is STOPPED after every eval: compute billing pauses while the disk and
-cached weights (/workspace/models) persist for a fast next run. --keep leaves it running.
+By default the vast instance is STOPPED after every eval. With --ssh the fixed box is left running.
 
 Self-healing: on --reuse, if the box won't become SSH-ready within --reuse-timeout (default 2 min),
 it is stopped and a fresh box is provisioned via the vast API automatically; the new id is saved to
 ~/.sparkinfer_vast_instance (VAST_INSTANCE_FILE) so the next run reuses it. --no-recreate disables this.
 
-Env: VAST_API_KEY, SSH_KEY (default ~/.ssh/id_ed25519), LLAMACPP_DIR, EVAL_IMAGE, EVAL_REPO, VAST_INSTANCE_FILE.
+Env: VAST_API_KEY, SSH_KEY, EVAL_TRANSPORT (vast|ssh), EVAL_SSH_HOST, EVAL_SSH_PORT, EVAL_REPO, VAST_INSTANCE_FILE.
 """
 import argparse, json, os, random, shlex, subprocess, sys, time
-from vastai import VastAI
+
+from ssh_box import ssh_box_arg, ssh_box_enabled
 
 REPO    = os.environ.get("EVAL_REPO",  "https://github.com/gittensor-ai-lab/sparkinfer")
 IMAGE   = os.environ.get("EVAL_IMAGE", "nvidia/cuda:12.8.0-devel-ubuntu24.04")   # needs nvcc for sm_120
@@ -224,6 +224,8 @@ def main():
                     choices=["longctx", "short"],
                     help="longctx scores 16k with a 128-token decode no-regression guard; short keeps legacy 128-token scoring")
     ap.add_argument("--reuse", type=int, default=0)
+    ap.add_argument("--ssh", default="", metavar="HOST:PORT",
+                    help="fixed SSH eval box (EVAL_TRANSPORT=ssh); vast.ai path unchanged when omitted")
     ap.add_argument("--keep", action="store_true", help="leave the instance running after eval (default: stop it)")
     ap.add_argument("--destroy", action="store_true", help="destroy after eval instead of stopping (also frees the disk)")
     ap.add_argument("--gpu", default="RTX_5090")
@@ -237,72 +239,100 @@ def main():
                     help="generate a Polaris verifiable receipt (unsigned attestation from eval box)")
     args = ap.parse_args()
 
-    v = VastAI(); created = False; iid = args.reuse
+    if not args.ssh and ssh_box_enabled():
+        args.ssh = ssh_box_arg()
+
+    bare_metal = bool(args.ssh)
+    got_result = False
+    v = None
+    iid = args.reuse
+    created = False
     host = port = None
-    bal = funds()
-    if bal is not None: print(f">> vast funds: ${bal:.2f} (balance + credit)")
 
-    # 1) Try to bring up the reused box within a bounded window (default 5 min).
-    if iid:
-        ep = bring_up(v, iid, args.reuse_timeout)
-        if ep:
-            host, port = ep
-            if args.pinned: _set_reuse_retries(0)   # pinned box is back up — clear the miss counter
-        elif args.no_recreate:
-            sys.exit(f"instance {iid} never came up (--no-recreate)")
-        elif args.pinned:
-            # PINNED: never destroy the stable box. Two failure modes:
-            #  - box GONE (vast reclaimed it — common for stopped boxes): retrying is pointless,
-            #    provision a fresh one NOW (the bot then auto-re-pins to it).
-            #  - box EXISTS but won't resume (host busy): retry on the next run, provision only
-            #    after REUSE_MAX_RETRIES misses.
-            if info_of(v, iid) is None:
-                print(f">> pinned instance {iid} no longer exists (vast reclaimed it) — "
-                      f"provisioning a fresh box now.")
-                _set_reuse_retries(0); iid = 0
-            else:
-                n = _reuse_retries() + 1
-                if n <= REUSE_MAX_RETRIES:
-                    _set_reuse_retries(n)
-                    print(f">> pinned instance {iid} exists but not SSH-ready within {args.reuse_timeout}s "
-                          f"(miss {n}/{REUSE_MAX_RETRIES}) — leaving it intact; retry on the next scheduled run.")
-                    sys.exit(PINNED_RETRY_RC)
-                _set_reuse_retries(0)
-                print(f">> pinned instance {iid} unavailable after {REUSE_MAX_RETRIES} retries — "
-                      f"provisioning a NEW box (pinned {iid} kept, NOT destroyed).")
-                iid = 0
-        else:
-            # Destroy the stuck box (can't SSH → no value in keeping disk) and provision a fresh one.
-            stuck_host = (info_of(v, iid) or {}).get("public_ipaddr")
-            print(f">> reused instance {iid} is dead/stuck — destroying it and provisioning a new box")
-            try: v.destroy_instance(id=iid)
-            except Exception as e: print("  destroy:", str(e)[:150])
-            iid = 0
+    if bare_metal:
+        ssh_host, _, ssh_port = args.ssh.partition(":")
+        if not ssh_host:
+            sys.exit("--ssh requires HOST:PORT")
+        host = ssh_host.strip()
+        port = int(ssh_port or "22")
+        if not wait_ssh(host, port, tries=12):
+            sys.exit(f"SSH box root@{host}:{port} not reachable")
+        print(f">> bare-metal eval box: ssh root@{host}:{port}")
+        args.keep = True  # never stop a fixed box
+    else:
+        from vastai import VastAI
+        v = VastAI()
+        bal = funds()
+        if bal is not None:
+            print(f">> vast.ai transport: funds ${bal:.2f} (balance + credit)")
 
-    # 2) No working box yet → create one, retrying on different hosts if needed.
-    if not iid:
-        skip = {stuck_host} if 'stuck_host' in dir() and stuck_host else set()
-        MAX_ATTEMPTS = 8   # ~half of cheap offers are phantom-running hosts; each bad one is bounded
-                           # by SSH_CONNECT_TIMEOUT, so try plenty of distinct hosts before erroring
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            iid = provision(v, args, skip_hosts=skip)
-            if not iid: sys.exit("could not provision an instance")
-            created = True
-            ep = bring_up(v, iid, args.new_timeout)
+    if not bare_metal:
+        # --- vast.ai: reuse / provision / bring-up (unchanged) ---
+        # 1) Try to bring up the reused box within a bounded window (default 5 min).
+        if iid:
+            ep = bring_up(v, iid, args.reuse_timeout)
             if ep:
-                host, port = ep; break
-            bad_host = (info_of(v, iid) or {}).get("public_ipaddr")
-            print(f">> instance {iid} (host {bad_host}) never came up — destroying and trying another")
-            try: v.destroy_instance(id=iid)
-            except Exception as e: print("  destroy:", str(e)[:150])
-            if bad_host: skip.add(bad_host)
-            iid = 0
-            if attempt == MAX_ATTEMPTS: sys.exit(f"all {MAX_ATTEMPTS} provision attempts failed — giving up")
+                host, port = ep
+                if args.pinned:
+                    _set_reuse_retries(0)
+            elif args.no_recreate:
+                sys.exit(f"instance {iid} never came up (--no-recreate)")
+            elif args.pinned:
+                if info_of(v, iid) is None:
+                    print(f">> pinned instance {iid} no longer exists (vast reclaimed it) — "
+                          f"provisioning a fresh box now.")
+                    _set_reuse_retries(0)
+                    iid = 0
+                else:
+                    n = _reuse_retries() + 1
+                    if n <= REUSE_MAX_RETRIES:
+                        _set_reuse_retries(n)
+                        print(f">> pinned instance {iid} exists but not SSH-ready within {args.reuse_timeout}s "
+                              f"(miss {n}/{REUSE_MAX_RETRIES}) — leaving it intact; retry on the next scheduled run.")
+                        sys.exit(PINNED_RETRY_RC)
+                    _set_reuse_retries(0)
+                    print(f">> pinned instance {iid} unavailable after {REUSE_MAX_RETRIES} retries — "
+                          f"provisioning a NEW box (pinned {iid} kept, NOT destroyed).")
+                    iid = 0
+            else:
+                stuck_host = (info_of(v, iid) or {}).get("public_ipaddr")
+                print(f">> reused instance {iid} is dead/stuck — destroying it and provisioning a new box")
+                try:
+                    v.destroy_instance(id=iid)
+                except Exception as e:
+                    print("  destroy:", str(e)[:150])
+                iid = 0
 
-    save_instance(iid)                              # persist the working id (the bot reuses it next run)
-    if args.reuse and iid != args.reuse:
-        print(f"NEW_INSTANCE_ID {iid}")             # machine-readable for the bot
-        print(f">> switched to fresh instance {iid} (old {args.reuse} stopped; destroy it if unneeded)")
+        # 2) No working box yet → create one, retrying on different hosts if needed.
+        stuck_host = None
+        if not iid:
+            skip = set()
+            MAX_ATTEMPTS = 8
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                iid = provision(v, args, skip_hosts=skip)
+                if not iid:
+                    sys.exit("could not provision an instance")
+                created = True
+                ep = bring_up(v, iid, args.new_timeout)
+                if ep:
+                    host, port = ep
+                    break
+                bad_host = (info_of(v, iid) or {}).get("public_ipaddr")
+                print(f">> instance {iid} (host {bad_host}) never came up — destroying and trying another")
+                try:
+                    v.destroy_instance(id=iid)
+                except Exception as e:
+                    print("  destroy:", str(e)[:150])
+                if bad_host:
+                    skip.add(bad_host)
+                iid = 0
+                if attempt == MAX_ATTEMPTS:
+                    sys.exit(f"all {MAX_ATTEMPTS} provision attempts failed — giving up")
+
+        save_instance(iid)
+        if args.reuse and iid != args.reuse:
+            print(f"NEW_INSTANCE_ID {iid}")
+            print(f">> switched to fresh instance {iid} (old {args.reuse} stopped; destroy it if unneeded)")
 
     MODEL_PATH = "/workspace/models/Qwen3-30B-A3B-Q4_K_M.gguf"
     MODEL_READY = "/tmp/sparkinfer_model_ready"
@@ -551,21 +581,24 @@ def main():
         if polaris_line:
             print(polaris_line)  # pass through to pr_eval_bot.py stdout
     finally:
-        # Default: STOP after every eval — pauses compute billing, keeps disk + weights for fast reuse.
-        # --destroy-on-error only destroys if the instance itself is the problem (created fresh but no
-        # result AND it's a newly created box — reused boxes that survive setup are kept even on eval
-        # failure, since the disk cache (model + llama.cpp) is still valuable for the next run).
-        destroy = args.destroy or (args.destroy_on_error and not got_result and created)
-        if args.keep:
-            print(f">> leaving instance {iid} running (--keep)")
-        elif destroy:
-            print(f">> destroying instance {iid} (disk freed)");
-            try: v.destroy_instance(id=iid)
-            except Exception as e: print("destroy:", str(e)[:150])
+        if bare_metal:
+            print(f">> bare-metal box left running (ssh root@{host}:{port})")
         else:
-            print(f">> stopping instance {iid} — disk/weights persist; resume with --reuse {iid}")
-            try: v.stop_instance(id=iid)
-            except Exception as e: print("stop:", str(e)[:150])
+            destroy = args.destroy or (args.destroy_on_error and not got_result and created)
+            if args.keep:
+                print(f">> leaving instance {iid} running (--keep)")
+            elif destroy:
+                print(f">> destroying instance {iid} (disk freed)")
+                try:
+                    v.destroy_instance(id=iid)
+                except Exception as e:
+                    print("destroy:", str(e)[:150])
+            else:
+                print(f">> stopping instance {iid} — disk/weights persist; resume with --reuse {iid}")
+                try:
+                    v.stop_instance(id=iid)
+                except Exception as e:
+                    print("stop:", str(e)[:150])
 
 if __name__ == "__main__":
     main()
