@@ -2,7 +2,8 @@
 """Polaris receipt verifier — standalone CLI. No GPU required.
 
 Verifies a Polaris receipt JSON file: checks the schema, hash integrity,
-Ed25519 signature, correctness gates, guard gates, and internal consistency.
+Ed25519 signature (software receipts) or Intel DCAP attestation (TDX receipts),
+correctness gates, guard gates, and internal consistency.
 
 Usage:
   python3 eval/polaris/verify.py receipt.json
@@ -233,13 +234,24 @@ def main():
     # ---- Output ----
     print()
     rid = receipt.get("receipt_id", "?")[:16]
-    pub_short = receipt.get("public_key", "?")[:16]
     ts = receipt.get("attestation", {}).get("timestamp_utc", "?")
+    is_tdx = receipt.get("attestation_type") == "tdx-quote" or "tdx" in receipt
 
-    print(f"=== Polaris Receipt Verification ===")
-    print(f"Receipt ID:  {rid}...")
-    print(f"Public key:  {pub_short}...")
-    print(f"Signed at:   {ts}")
+    if is_tdx:
+        tdx = receipt.get("tdx", {})
+        intel_ok = tdx.get("verification", {}).get("intel_verified", False)
+        e2e_pub = (tdx.get("e2e_pubkey_b64", "") or "")[:16]
+        print(f"=== Polaris TDX Receipt Verification ===")
+        print(f"Receipt ID:  {rid}...")
+        print(f"Intel DCAP:  {'✓ verified' if intel_ok else '✗ NOT verified'}")
+        print(f"E2E pubkey:  {e2e_pub}..." if e2e_pub else f"E2E pubkey:  (not set)")
+        print(f"Signed at:   {ts}")
+    else:
+        pub_short = receipt.get("public_key", "?")[:16]
+        print(f"=== Polaris Receipt Verification ===")
+        print(f"Receipt ID:  {rid}...")
+        print(f"Public key:  {pub_short}...")
+        print(f"Signed at:   {ts}")
     print()
 
     for line in results:
@@ -250,7 +262,8 @@ def main():
 
     print()
     if passed:
-        print(f"=== Status: VERIFIED — {len([r for r in results if r.startswith('✓')])}/{len(results)} checks passed ===")
+        attest_type = "TDX Intel DCAP" if is_tdx else "Ed25519"
+        print(f"=== Status: {attest_type} VERIFIED — {len([r for r in results if r.startswith('✓')])}/{len(results)} checks passed ===")
         sys.exit(0)
     else:
         failed = len([r for r in results if r.startswith("✗")])

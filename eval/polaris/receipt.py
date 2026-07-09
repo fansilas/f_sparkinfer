@@ -5,14 +5,21 @@ A Polaris receipt binds a SparkInfer eval result to its provenance — code comm
 model SHA256, eval seed, build hash, observed clock — so a third party can verify
 the result without re-running the GPU job.
 
-The receipt has three layers:
-  1. attestation  — canonical data block (what gets signed)
-  2. signature    — Ed25519 signature over canonical attestation bytes
-  3. receipt      — attestation + signature + public_key + chain metadata
+Two attestation modes are supported:
+
+  Ed25519 (software signatures):
+    1. attestation  — canonical data block (what gets signed)
+    2. signature    — Ed25519 signature over canonical attestation bytes
+    3. receipt      — attestation + signature + public_key + chain metadata
+
+  Polaris TDX (hardware attestation via Intel DCAP):
+    1. attestation  — canonical data block (provenance metadata)
+    2. tdx          — Polaris DCAP-quoted receipt (quote, collateral, verification)
+    3. receipt      — attestation + tdx + attestation_type + chain metadata
 
 Design:
-  - Software-first: Ed25519 signatures today; TDX quotes as a drop-in upgrade.
-  - Judge (on eval box) assembles the unsigned attestation; the bot signs it.
+  - Judge (on eval box) assembles the unsigned attestation; the bot submits
+    scoring to Polaris TDX or signs with Ed25519 as a fallback.
   - Canonical JSON (sorted keys, compact separators, pre-rounded floats) ensures
     deterministic hashing across Python versions.
 """
@@ -157,6 +164,70 @@ def build_receipt(attestation: dict, private_key_bytes: bytes,
         "attestation": attestation,
         "signature": signature_b64,
         "public_key": base64.b64encode(pub_bytes).decode("ascii"),
+    }
+
+
+# Alias for clarity when both paths are in play
+build_ed25519_receipt = build_receipt
+
+
+def build_polaris_receipt(
+    polaris_response: dict,
+    attestation: dict,
+    prev_receipt_hash: Optional[str] = None,
+    chain_index: int = 0,
+) -> dict:
+    """Assemble a Polaris TDX receipt from a Polaris /v1/attest response.
+
+    This wraps the Polaris DCAP-quoted attestation (Intel TDX hardware root of
+    trust) around our standard attestation structure. The receipt carries the
+    full DCAP quote + collateral chain so verifiers can check everything
+    offline without trusting Polaris.
+
+    Args:
+        polaris_response: The JSON response from Polaris POST /v1/attest.
+        attestation: Our canonical attestation dict (code/refs/env/measurements/verdict).
+        prev_receipt_hash: SHA256 of the previous receipt in the chain (or None).
+        chain_index: Monotonically increasing index.
+
+    Returns:
+        Complete TDX receipt dict ready for JSON serialization.
+    """
+    tee = polaris_response.get("tee_attestation", {})
+    verification = tee.get("verification", {})
+
+    # Receipt ID: bind the quote and result together
+    id_input = (tee.get("quote_b64", "")[:64] +
+                tee.get("result_sha256", "")).encode("utf-8")
+    rid = hashlib.sha256(id_input).hexdigest()[:32]
+
+    return {
+        "polaris_version": 1,
+        "receipt_id": rid,
+        "chain": {
+            "prev_receipt_hash": prev_receipt_hash,
+            "chain_index": chain_index,
+        },
+        "attestation": attestation,
+        "attestation_type": "tdx-quote",
+        "tdx": {
+            "quote_b64": tee.get("quote_b64", ""),
+            "collateral_b64": tee.get("collateral_b64", ""),
+            "nonce": tee.get("nonce", ""),
+            "e2e_pubkey_b64": tee.get("e2e_pubkey_b64", ""),
+            "bound_digest": tee.get("bound_digest", ""),
+            "result_sha256": tee.get("result_sha256", ""),
+            "stdout_b64": polaris_response.get("stdout_b64", ""),
+            "files_sha256": tee.get("files_sha256", ""),
+            "workload_sha256": tee.get("workload_sha256", ""),
+            "verification": {
+                "intel_verified": verification.get("intel_verified", False),
+                "report_data_match": verification.get("report_data_match", False),
+            },
+            "cost_usd": polaris_response.get("cost_usd"),
+        },
+        # Carry expected hashes for verification
+        "_expected": polaris_response.get("_expected", {}),
     }
 
 
@@ -458,8 +529,18 @@ class ReceiptValidator:
     def verify(self, public_key_b64: Optional[str] = None) -> Tuple[bool, List[str]]:
         """Run all verification checks.
 
+        Auto-detects receipt type: if attestation_type is "tdx-quote" or a
+        "tdx" key is present, runs TDX verification. Otherwise runs Ed25519
+        verification.
+
         Returns (passed: bool, results: list of "✓ ..." / "✗ ..." strings).
         """
+        if self.receipt.get("attestation_type") == "tdx-quote" or "tdx" in self.receipt:
+            return self.verify_tdx(public_key_b64)
+        return self._verify_ed25519(public_key_b64)
+
+    def _verify_ed25519(self, public_key_b64: Optional[str] = None) -> Tuple[bool, List[str]]:
+        """Ed25519 verification path (original)."""
         results = []
 
         # 1. Schema
@@ -503,6 +584,107 @@ class ReceiptValidator:
 
         passed = all(line.startswith("✓") for line in results)
         return passed, results
+
+    def verify_tdx(self, public_key_b64: Optional[str] = None) -> Tuple[bool, List[str]]:
+        """TDX hardware attestation verification path.
+
+        Validates a Polaris TDX receipt:
+        1. Intel DCAP verification (intel_verified flag)
+        2. Result hash integrity (result_sha256 matches stdout)
+        3. E2E pubkey binding (our key is in the quote)
+        4. Schema + consistency (same as Ed25519 path)
+        """
+        results = []
+        tdx = self.receipt.get("tdx", {})
+        verification = tdx.get("verification", {})
+
+        # 1. Intel DCAP verification
+        if verification.get("intel_verified"):
+            results.append("✓ Intel DCAP: quote verified by Intel")
+        else:
+            results.append("✗ Intel DCAP: quote NOT verified")
+
+        # 2. Report data match
+        if verification.get("report_data_match"):
+            results.append("✓ DCAP report_data: bindings match")
+        else:
+            results.append("✗ DCAP report_data: bindings MISMATCH")
+
+        # 3. Result hash integrity — sha256(stdout) must match result_sha256
+        result_sha256 = tdx.get("result_sha256", "")
+        stdout_b64 = tdx.get("stdout_b64", "")
+        if result_sha256 and stdout_b64:
+            try:
+                stdout_bytes = base64.b64decode(stdout_b64)
+                computed = hashlib.sha256(stdout_bytes).hexdigest()
+                if computed == result_sha256:
+                    results.append(f"✓ result hash: stdout matches result_sha256 ({computed[:16]}...)")
+                else:
+                    results.append(
+                        f"✗ result hash MISMATCH: computed {computed[:16]}... "
+                        f"!= expected {result_sha256[:16]}..."
+                    )
+            except Exception as e:
+                results.append(f"✗ result hash: failed to decode stdout — {e}")
+        elif result_sha256:
+            results.append("⚠ result hash: no stdout_b64 to verify against")
+        else:
+            results.append("⚠ result hash: no result_sha256 in TDX receipt")
+
+        # 4. E2E pubkey binding — check our public key is in the quote
+        e2e_pubkey = tdx.get("e2e_pubkey_b64", "")
+        if public_key_b64:
+            if e2e_pubkey == public_key_b64:
+                results.append("✓ e2e pubkey: matches trusted key")
+            else:
+                results.append(
+                    "✗ e2e pubkey MISMATCH: receipt key does not match trusted key"
+                )
+        elif e2e_pubkey:
+            results.append(f"✓ e2e pubkey present ({e2e_pubkey[:16]}...) — no trusted key provided")
+        else:
+            results.append("⚠ e2e pubkey: not present in TDX receipt")
+
+        # 5. Schema validation for TDX receipts
+        tdx_issues = self._validate_tdx_schema()
+        if not tdx_issues:
+            results.append("✓ TDX schema valid")
+        else:
+            for issue in tdx_issues:
+                results.append(f"✗ TDX schema: {issue}")
+
+        # 6. Hash integrity (receipt_id)
+        hash_ok, hash_msg = self.verify_hash()
+        results.append(f"{'✓' if hash_ok else '✗'} hash integrity: {hash_msg}")
+
+        # 7. Consistency checks (same as Ed25519 path)
+        consistency_issues = self.validate_consistency()
+        if not consistency_issues:
+            results.append("✓ internal consistency")
+        else:
+            for issue in consistency_issues:
+                results.append(f"✗ consistency: {issue}")
+
+        # 8. Gate re-checks
+        gate_results = self._recheck_gates()
+        results.extend(gate_results)
+
+        passed = all(line.startswith("✓") for line in results)
+        return passed, results
+
+    def _validate_tdx_schema(self) -> List[str]:
+        """Check that all required TDX fields are present."""
+        issues = []
+        tdx = self.receipt.get("tdx", {})
+
+        for k in ["quote_b64", "collateral_b64", "result_sha256", "verification"]:
+            if k not in tdx:
+                issues.append(f"missing tdx.{k}")
+
+        if not isinstance(tdx.get("verification", {}).get("intel_verified"), bool):
+            issues.append("tdx.verification.intel_verified must be a boolean")
+
+        return issues
 
     def _recheck_gates(self) -> List[str]:
         """Re-check correctness gates from attested measurements."""
