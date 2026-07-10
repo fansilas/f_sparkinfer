@@ -119,6 +119,10 @@ by earliest PR-*open* time, which inverted the real authorship.
 reassigned to **`jony376`** — #209 labeled `flagged:gaming`/`copycat` + closed, `jony376` added to
 `blocked-contributors.txt`. fansilas's merged record (#195/#122/#86/#83) stands.
 
-## 2026-07-10 — `inference2026` (auto-blocked)
+## 2026-07-10 — `inference2026` (auto-blocked, then cleared)
 
-#326 ≥85% copycat of #195 (100%)
+#326 was auto-blocked as ≥85% copycat of #195 — **false positive**: per-function
+containment matched a 7-token `fa_split_gqa_kernel<...>` template instantiation line
+(100% boilerplate overlap); actual PR-level containment vs #195 was 27%. Maintainer
+cleared: removed from `blocked-contributors.txt`, label `copycat-cleared`, #326 reopened
+for eval.

@@ -487,7 +487,8 @@ def main():
             func_c, func_csig, func_osig = per_function_containment(REPO, pr_num, e_num)
             if func_c >= FUNC_BLOCK_WARN:
                 structural_fired = True; best_lev = func_c; best_cos = -1.0
-                best_containment = max(best_containment, func_c, COPYCAT_WARN)
+                # Per-function hits WARN only — never promote func_c to PR-level block.
+                best_containment = max(best_containment, COPYCAT_WARN)
                 if not original or func_c > (best_containment if original == e_num else 0):
                     original = e_num; orig_author = e_author
                 print(f"  per-function bump: {func_csig[:60]}... is {func_c:.0%} contained in #{e_num} -> WARN")
@@ -499,7 +500,7 @@ def main():
                 print(f"  LLM: copycat={is_copy} confidence={llm_conf:.2f} reason={reason[:120]}")
                 if is_copy and llm_conf >= LLM_CONFIDENCE_MIN:
                     structural_fired = True; best_lev = llm_conf; best_cos = 0.0
-                    best_containment = max(best_containment, func_c, COPYCAT_WARN)
+                    best_containment = max(best_containment, COPYCAT_WARN)
                     if not original or func_c > (best_containment if original == e_num else 0):
                         original = e_num; orig_author = e_author
                     print(f"  LLM verdict: COPYCAT CONFIRMED -> bumping to WARN vs #{e_num}")
