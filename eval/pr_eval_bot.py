@@ -418,28 +418,56 @@ def render(res, oid):
                     f"({'pass' if res.get('pass_qwen35') else 'fail'}) |")
         rows.append(f"| Qwen3.6 score | `eval-qwen36:{res.get('label_qwen36', '?')}` "
                     f"({'pass' if res.get('pass_qwen36') else 'fail'}) |")
-    rows += [
-            f"| scored decode ({res.get('score_context', 128)} ctx{f' · {ctx_label}' if ctx_label else ''}{f' · {short}' if dual or triple or bidir else ''}) | {res.get('tps','?')} tok/s |",
-            f"| correctness{f' ({short} vs llama.cpp)' if dual or triple or bidir else ''} | top-1 {res.get('top1',0)*100:.1f}% · KL {res.get('kl','?')} |"]
-    # scored-model per-context no-regression gates — SKIP contexts not measured (tps 0/None) so a
-    # deliberately-skipped 16k/32k never renders a misleading "0.0 tok/s · pass".
-    for key, gkey, bkey, lbl in [("ctx_128_tps", "guard_128_pass", "guard_128_baseline", "128-token"),
-                                 ("ctx_512_tps", "guard_512_pass", "guard_512_baseline", "512-context"),
-                                 ("ctx_4096_tps", "guard_4k_pass", "guard_4k_baseline", "4k-context"),
-                                 ("ctx_16384_tps", "guard_16k_pass", "guard_16k_baseline", "16k-context"),
-                                 ("ctx_32768_tps", "guard_32k_pass", "guard_32k_baseline", "32k-context")]:
-        tps = res.get(key)
-        if not tps:
-            continue
-        gate = "pass" if res.get(gkey, True) else "fail"
-        base = res.get(bkey) or _GUARD_BASE_FALLBACK.get(bkey, 0)
-        rows.append(f"| {f'{short} ' if dual or triple else ''}{lbl} no-regression gate | {tps} tok/s"
-                    f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
-    if res.get("ctx_2048_tps") is not None and res.get("ctx_512_tps") is None:
-        gate = "pass" if res.get("guard_2k_pass", True) else "fail"
-        base = res.get("guard_2k_baseline") or 0
-        rows.append(f"| legacy 2k no-regression gate | {res.get('ctx_2048_tps')} tok/s"
-                    f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
+        for title, block in [("Qwen3.5", res.get("score_qwen35") or {}),
+                             ("Qwen3.6", res.get("score_qwen36") or {})]:
+            if not block:
+                continue
+            bctx = block.get("best_context_label")
+            sc = block.get("score_context", 128)
+            if block.get("frontier_tps", 0) > 0:
+                rows.append(f"| {title} vs same-box main | {block['frontier_tps']} tok/s → "
+                            f"{block.get('pct_over_frontier', 0):+.1f}% "
+                            f"({block.get('delta_tps', 0):+.1f}) |")
+            rows.append(f"| {title} scored decode ({sc} ctx"
+                        f"{f' · {bctx}' if bctx else ''}) | {block.get('tps', '?')} tok/s |")
+            rows.append(f"| {title} correctness | top-1 {block.get('top1', 0) * 100:.1f}% · "
+                        f"KL {block.get('kl', '?')} |")
+            for key, gkey, bkey, lbl in [
+                    ("ctx_128_tps", "guard_128_pass", "guard_128_baseline", "128-token"),
+                    ("ctx_512_tps", "guard_512_pass", "guard_512_baseline", "512-context"),
+                    ("ctx_4096_tps", "guard_4k_pass", "guard_4k_baseline", "4k-context"),
+                    ("ctx_16384_tps", "guard_16k_pass", "guard_16k_baseline", "16k-context"),
+                    ("ctx_32768_tps", "guard_32k_pass", "guard_32k_baseline", "32k-context")]:
+                tps = block.get(key)
+                if not tps:
+                    continue
+                gate = "pass" if block.get(gkey, True) else "fail"
+                base = block.get(bkey) or _GUARD_BASE_FALLBACK.get(bkey, 0)
+                rows.append(f"| {title} {lbl} no-regression gate | {tps} tok/s"
+                            f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
+    if not bidir:
+        rows += [
+            f"| scored decode ({res.get('score_context', 128)} ctx{f' · {ctx_label}' if ctx_label else ''}{f' · {short}' if dual or triple else ''}) | {res.get('tps','?')} tok/s |",
+            f"| correctness{f' ({short} vs llama.cpp)' if dual or triple else ''} | top-1 {res.get('top1',0)*100:.1f}% · KL {res.get('kl','?')} |"]
+        # scored-model per-context no-regression gates — SKIP contexts not measured (tps 0/None) so a
+        # deliberately-skipped 16k/32k never renders a misleading "0.0 tok/s · pass".
+        for key, gkey, bkey, lbl in [("ctx_128_tps", "guard_128_pass", "guard_128_baseline", "128-token"),
+                                     ("ctx_512_tps", "guard_512_pass", "guard_512_baseline", "512-context"),
+                                     ("ctx_4096_tps", "guard_4k_pass", "guard_4k_baseline", "4k-context"),
+                                     ("ctx_16384_tps", "guard_16k_pass", "guard_16k_baseline", "16k-context"),
+                                     ("ctx_32768_tps", "guard_32k_pass", "guard_32k_baseline", "32k-context")]:
+            tps = res.get(key)
+            if not tps:
+                continue
+            gate = "pass" if res.get(gkey, True) else "fail"
+            base = res.get(bkey) or _GUARD_BASE_FALLBACK.get(bkey, 0)
+            rows.append(f"| {f'{short} ' if dual or triple else ''}{lbl} no-regression gate | {tps} tok/s"
+                        f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
+        if res.get("ctx_2048_tps") is not None and res.get("ctx_512_tps") is None:
+            gate = "pass" if res.get("guard_2k_pass", True) else "fail"
+            base = res.get("guard_2k_baseline") or 0
+            rows.append(f"| legacy 2k no-regression gate | {res.get('ctx_2048_tps')} tok/s"
+                        f"{f' vs main {base} tok/s' if base else ''} · {gate} |")
     # The Qwen3-30B no-regression guard — the check that actually gates a dual verdict.
     if bidir:
         for title, block in [("Qwen3.5 optimize", res.get("score_qwen35") or {}),
@@ -495,7 +523,7 @@ def render(res, oid):
     if res.get("regression_labels") or res.get("guard_regression_labels"):
         allregs = (res.get("regression_labels") or []) + (res.get("guard_regression_labels") or [])
         rows.append(f"| regressions | {', '.join(allregs)} |")
-    if "frontier_tps" in res and res.get("frontier_tps", 0) > 0:
+    if not bidir and "frontier_tps" in res and res.get("frontier_tps", 0) > 0:
         # "frontier_tps" is now the SAME-BOX origin/main baseline — the gain is measured directly
         # against main on the same GPU in the same run, not a passed-in frontier number.
         rows.insert(2, f"| vs same-box main | {res['frontier_tps']} tok/s → "
