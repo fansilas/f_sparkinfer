@@ -588,9 +588,9 @@ void launch_flash_decode_split(
                     reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool, block_table, seq_lens,
                     part_m, part_l, part_acc, scale, num_q_heads, num_kv_heads, block_size, max_blocks, n_splits,
                     reinterpret_cast<const __half*>(k_scale), reinterpret_cast<const __half*>(v_scale));
-            fa_combine_kernel<256, FA_COMBINE_DG, FA_COMBINE_NW><<<g2, FA_COMBINE_NW * 32, 0, stream>>>(
-                part_m, part_l, part_acc, reinterpret_cast<__nv_bfloat16*>(out), num_q_heads, n_splits,
-                reinterpret_cast<fa_block_q8_1*>(out_q8));
+            fa_launch_combine_dispatch_hd256(part_m, part_l, part_acc,
+                reinterpret_cast<__nv_bfloat16*>(out), num_q_heads, n_splits,
+                reinterpret_cast<fa_block_q8_1*>(out_q8), num_seqs, stream);
             (void)seqlen;
             return;
         }
