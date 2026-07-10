@@ -5,7 +5,7 @@ Multi-layer copycat detection, fires the instant a PR is opened:
 
   LAYER 1 (containment): ≥85% → block + close
   LAYER 2 (containment): 75–84% → copycat-warn label + warning comment
-  LAYER 4 (per-function) : ≥92% single-function containment → warn (dilution evasion)
+  LAYER 4 (per-function) : ≥92% single-function containment → warn only (never block alone)
   3 warning strikes (any layer) → block + close
 
 Structural similarity and LLM auto-warn are disabled (too many FPs on independent
@@ -13,7 +13,7 @@ contributors landing similar optimizations). Self-resubmissions are excluded.
 
 Invoked by .github/workflows/copycat-guard.yml via:  PR_NUM=<num> python3 eval/copycat_guard.py
 """
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 from datetime import date
 from pathlib import Path
 
@@ -59,6 +59,29 @@ PROVIDER_DEFAULTS = {
 
 def gh(args):
     return subprocess.run(["gh"] + args, capture_output=True, text=True)
+
+
+# CUDA launch / template-instantiation one-liners converge across independent GQA PRs.
+_BOILERPLATE_RE = re.compile(
+    r'<<<|cudaLaunch|\w+_kernel\s*<|^\s*\w+<\d',
+    re.I,
+)
+
+
+def is_boilerplate_block(sig, body):
+    """Skip per-function scoring on shared launch/dispatch boilerplate."""
+    text = f"{sig} {body}".strip()
+    if _BOILERPLATE_RE.search(text) and len(body.splitlines()) <= 3:
+        return True
+    s = sig.strip()
+    if s.startswith(("if ", "if(", "} else", "else if")):
+        return True
+    return False
+
+
+def pr_has_label(repo, num, label):
+    info = json.loads(gh(["pr", "view", str(num), "-R", repo, "--json", "labels"]).stdout or "{}")
+    return any(l.get("name") == label for l in info.get("labels", []))
 
 
 # ---- fingerprinting (both layers) ----
@@ -188,6 +211,8 @@ def per_function_containment(repo, copy_num, orig_num):
         return 0.0, "", ""
     best = 0.0; best_copy_sig = ""; best_orig_sig = ""
     for csig, cb in copy_blocks:
+        if is_boilerplate_block(csig, cb):
+            continue
         ctokens = set(cb.split())
         if len(ctokens) < 5:
             continue
@@ -442,6 +467,8 @@ def main():
     denylist = load_denylist()
     if author.lower() in denylist:
         print(f"  author {author} already in denylist — skip"); return
+    if pr_has_label(REPO, pr_num, "copycat-cleared"):
+        print("  copycat-cleared label — skip"); return
 
     files, added = pr_fingerprint(REPO, pr_num)
     if not added:
@@ -451,6 +478,9 @@ def main():
                                "--json", "number,author,isDraft,state", "--limit", "300"]).stdout or "[]")
     log = load_copycat_log()
     blocked_prs = {e["pr"] for e in log if e.get("blocked", True)}
+    cleared_prs = {e["pr"] for e in log if e.get("blocked") is False}
+    if pr_num in cleared_prs:
+        print("  cleared in copycats.json — skip"); return
     pr_author = {p["number"]: p["author"]["login"] for p in open_prs}
     earlier_nums = sorted(
         p["number"] for p in open_prs
@@ -460,6 +490,7 @@ def main():
     print(f"  {len(earlier_nums)} earlier open/merged non-draft PRs to check")
 
     original = None; orig_author = None; best_containment = 0.0
+    pr_level_containment = 0.0
     best_lev = 0.0; best_cos = 0.0; structural_fired = False
 
     for e_num in earlier_nums:
@@ -470,6 +501,8 @@ def main():
         ef, ea = pr_fingerprint(REPO, e_num)
         if not (files & ef): continue
         c = containment(added, ea)
+        if c > pr_level_containment:
+            pr_level_containment = c
         if c > best_containment:
             original = e_num; orig_author = e_author; best_containment = c
         if c >= COPYCAT_BLOCK:
@@ -487,10 +520,8 @@ def main():
             func_c, func_csig, func_osig = per_function_containment(REPO, pr_num, e_num)
             if func_c >= FUNC_BLOCK_WARN:
                 structural_fired = True; best_lev = func_c; best_cos = -1.0
-                # Per-function hits WARN only — never promote func_c to PR-level block.
                 best_containment = max(best_containment, COPYCAT_WARN)
-                if not original or func_c > (best_containment if original == e_num else 0):
-                    original = e_num; orig_author = e_author
+                original = e_num; orig_author = e_author
                 print(f"  per-function bump: {func_csig[:60]}... is {func_c:.0%} contained in #{e_num} -> WARN")
             elif _llm_enabled() and func_c >= LLM_FUNC_MIN:
                 print(f"  layer 4 LLM: per-function containment={func_c:.1%} (vs #{e_num})")
@@ -500,7 +531,7 @@ def main():
                 print(f"  LLM: copycat={is_copy} confidence={llm_conf:.2f} reason={reason[:120]}")
                 if is_copy and llm_conf >= LLM_CONFIDENCE_MIN:
                     structural_fired = True; best_lev = llm_conf; best_cos = 0.0
-                    best_containment = max(best_containment, COPYCAT_WARN)
+                    best_containment = max(best_containment, func_c, COPYCAT_WARN)
                     if not original or func_c > (best_containment if original == e_num else 0):
                         original = e_num; orig_author = e_author
                     print(f"  LLM verdict: COPYCAT CONFIRMED -> bumping to WARN vs #{e_num}")
@@ -512,10 +543,10 @@ def main():
         print(f"  only {len(added)} added lines (<{MIN_ADDED_LINES}) and "
               f"containment {best_containment:.0%} < {LITERAL_BLOCK:.0%} — skip"); return
 
-    is_block = (best_containment >= COPYCAT_BLOCK)
+    is_block = (pr_level_containment >= COPYCAT_BLOCK)
     if structural_fired and not is_block:
         best_containment = max(best_containment, COPYCAT_WARN)
-        print(f"  bumping to WARN: lev/bump={best_lev:.2f}")
+        print(f"  bumping to WARN: per-function/structural (PR-level {pr_level_containment:.0%})")
 
     if is_block:
         print(f"  COPYCAT ≥85%: #{pr_num} is {best_containment:.1%} contained in #{original} by {orig_author}")
@@ -527,7 +558,9 @@ def main():
         close_blocked_pr(REPO, pr_num, {author})
         print("  block + close done")
     else:
-        warn_strikes = sum(1 for e in log if e.get("author") == author and not e.get("blocked", True))
+        warn_strikes = sum(1 for e in log
+                           if e.get("author") == author and not e.get("blocked", True)
+                           and int(e.get("penalty_days", PENALTY_DAYS)) != 0)
         strike = warn_strikes + 1
         tag = "LLM" if (structural_fired and best_cos == 0.0) else ("func" if structural_fired else "containment")
         print(f"  COPYCAT WARN ({tag}): #{pr_num} vs #{original} (strike {strike}/{MAX_WARNINGS})")

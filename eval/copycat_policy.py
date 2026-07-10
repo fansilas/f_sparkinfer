@@ -9,7 +9,8 @@ MAX_WARNINGS = 3       # warns before auto-block
 MIN_ADDED_LINES = 15
 LITERAL_BLOCK = 0.98   # still block tiny PRs if ≥98% literal
 
-# Per-function dilution catch (near-verbatim kernel embedded in larger PR)
+# Per-function dilution catch (near-verbatim kernel embedded in larger PR).
+# WARN only — never escalates to block on its own (PR-level containment must be ≥85%).
 FUNC_BLOCK_WARN = 0.92
 
 # Structural (Levenshtein + bigram) layer disabled — too many FPs on independent

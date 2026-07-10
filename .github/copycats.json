@@ -63,6 +63,8 @@
     "date": "2026-07-10",
     "blocked": false,
     "penalty_days": 0,
-    "note": "maintainer-cleared false positive: guard matched template boilerplate vs #195; actual PR-level containment 27%"
+    "strike": 0,
+    "containment": 0.27,
+    "note": "false positive cleared: per-function template-launch matched #195 at 100%; PR-level overlap 27%"
   }
 ]

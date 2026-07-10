@@ -231,6 +231,7 @@ from copycat_guard import warn_copycat
 FLAG_FILE = os.path.join(ROOT, ".github", "FLAGGED.md")
 COPYCAT_LABEL = "copycat"
 COPYCAT_WARN_LABEL = "copycat-warn"
+COPYCAT_CLEARED_LABEL = "copycat-cleared"
 COPYCAT_LOG = os.path.join(ROOT, ".github", "copycats.json")
 COPYCAT_CONTAINMENT = COPYCAT_BLOCK   # back-compat alias
 PENALTY_DAYS = 5             # legacy penalty window for old log entries
@@ -245,11 +246,14 @@ def author_penalty_until(author):
     lifts = []
     for e in load_copycat_log():
         if str(e.get("author", "")).lower() == author.lower():
+            if e.get("blocked") is False and int(e.get("penalty_days", PENALTY_DAYS)) == 0:
+                continue
             try:
                 d = datetime.date.fromisoformat(e["date"])
                 days = int(e.get("penalty_days", PENALTY_DAYS))
                 lifts.append(d + datetime.timedelta(days=days))
-            except Exception: pass
+            except Exception:
+                pass
     if not lifts: return None
     until = max(lifts)
     return until if datetime.date.today() <= until else None
@@ -1198,7 +1202,9 @@ def main():
     pr_author = {p["number"]: (p.get("author") or {}).get("login", "?") for p in all_prs}
     fps = {n: pr_fingerprint(args.repo, n) for n in all_nums}
     copy_log = load_copycat_log()
-    logged_copycats = {e["pr"] for e in copy_log}
+    logged_blocked = {e["pr"] for e in copy_log if e.get("blocked", True)}
+    logged_any = {e["pr"] for e in copy_log}
+    cleared_copycats = {e["pr"] for e in copy_log if e.get("blocked") is False}
     state_changed = False
 
     def find_copycat_match(num):
@@ -1217,7 +1223,7 @@ def main():
                 continue
             if ea_login.lower() in denylist:
                 continue
-            if earlier in logged_copycats:
+            if earlier in logged_blocked:
                 continue
             ef, ea = fps.get(earlier, (set(), set()))
             if not (files & ef):
@@ -1246,40 +1252,45 @@ def main():
             if not args.dry_run: close_blocked_pr(args.repo, num, hits)
             continue
         # Gate 2 — copycat: tiered containment vs earlier PRs (open/closed/merged).
-        original, copy_c = find_copycat_match(num)
-        if original is not None:
-            author = pr_author.get(num, "?")
-            _, added = fps.get(num, (set(), set()))
-            if skip_copycat_scoring(added, copy_c):
-                print(f"PR #{num}: copycat-like #{original} at {copy_c:.0%} but too few added lines — allow eval")
-            elif copy_c >= COPYCAT_BLOCK:
-                print(f"PR #{num}: COPYCAT ≥85% of #{original} by {pr_author.get(original,'?')} "
-                      f"(author {author}) — block, no eval")
-                if not args.dry_run and num not in logged_copycats:
-                    flag_copycat(args.repo, num, original, author)
-                    copy_log.append({"pr": num, "author": author, "original": original,
-                                     "date": datetime.date.today().isoformat(), "blocked": True})
-                    logged_copycats.add(num); state_changed = True
-                    if author.lower() not in load_denylist():
-                        block_account(author, f"#{num} ≥85% copycat of #{original} ({copy_c:.0%})")
-                        close_blocked_pr(args.repo, num, {author})
-                continue
-            else:
-                print(f"PR #{num}: COPYCAT WARN {copy_c:.0%} of #{original} by {pr_author.get(original,'?')} "
-                      f"(author {author}) — warn, skip eval")
-                if not args.dry_run and num not in logged_copycats:
-                    warn_strikes = sum(1 for e in copy_log
-                                       if e.get("author") == author and not e.get("blocked", True))
-                    strike = warn_strikes + 1
-                    will_block = warn_copycat(args.repo, num, original, author, strike, copy_c)
-                    copy_log.append({"pr": num, "author": author, "original": original,
-                                     "date": datetime.date.today().isoformat(), "blocked": False,
-                                     "strike": strike, "containment": round(copy_c, 3)})
-                    logged_copycats.add(num); state_changed = True
-                    if will_block and author.lower() not in load_denylist():
-                        block_account(author, f"{MAX_WARNINGS} copycat strikes: #{num} (vs #{original})")
-                        close_blocked_pr(args.repo, num, {author})
-                continue
+        pr_labels = {l["name"] for l in pr.get("labels", [])}
+        if COPYCAT_CLEARED_LABEL in pr_labels or num in cleared_copycats:
+            print(f"PR #{num}: copycat-cleared — skip copycat gate")
+        else:
+            original, copy_c = find_copycat_match(num)
+            if original is not None:
+                author = pr_author.get(num, "?")
+                _, added = fps.get(num, (set(), set()))
+                if skip_copycat_scoring(added, copy_c):
+                    print(f"PR #{num}: copycat-like #{original} at {copy_c:.0%} but too few added lines — allow eval")
+                elif copy_c >= COPYCAT_BLOCK:
+                    print(f"PR #{num}: COPYCAT ≥85% of #{original} by {pr_author.get(original,'?')} "
+                          f"(author {author}) — block, no eval")
+                    if not args.dry_run and num not in logged_any:
+                        flag_copycat(args.repo, num, original, author)
+                        copy_log.append({"pr": num, "author": author, "original": original,
+                                         "date": datetime.date.today().isoformat(), "blocked": True})
+                        logged_blocked.add(num); logged_any.add(num); state_changed = True
+                        if author.lower() not in load_denylist():
+                            block_account(author, f"#{num} ≥85% copycat of #{original} ({copy_c:.0%})")
+                            close_blocked_pr(args.repo, num, {author})
+                    continue
+                else:
+                    print(f"PR #{num}: COPYCAT WARN {copy_c:.0%} of #{original} by {pr_author.get(original,'?')} "
+                          f"(author {author}) — warn, skip eval")
+                    if not args.dry_run and num not in logged_any:
+                        warn_strikes = sum(1 for e in copy_log
+                                           if e.get("author") == author and not e.get("blocked", True)
+                                           and int(e.get("penalty_days", PENALTY_DAYS)) != 0)
+                        strike = warn_strikes + 1
+                        will_block = warn_copycat(args.repo, num, original, author, strike, copy_c)
+                        copy_log.append({"pr": num, "author": author, "original": original,
+                                         "date": datetime.date.today().isoformat(), "blocked": False,
+                                         "strike": strike, "containment": round(copy_c, 3)})
+                        logged_any.add(num); state_changed = True
+                        if will_block and author.lower() not in load_denylist():
+                            block_account(author, f"{MAX_WARNINGS} copycat strikes: #{num} (vs #{original})")
+                            close_blocked_pr(args.repo, num, {author})
+                    continue
         areas = areas_for_pr(args.repo, num)
         print(f"PR #{num} @ {oid}: areas={sorted(areas) or ['(none)']} ref={ref}")
         if not args.dry_run: apply_area_labels(args.repo, num, areas)

@@ -4,7 +4,7 @@ name: copycat-guard
 # comment, and close). Tiered detection (eval/copycat_policy.py):
 #   ≥85% containment -> block+close
 #   75-84% containment -> copycat-warn + comment
-#   ≥92% per-function containment -> copycat-warn (dilution evasion)
+#   ≥92% per-function containment -> copycat-warn only (never block alone; PR-level ≥85% required)
 #   3 warnings -> block+close
 
 on:

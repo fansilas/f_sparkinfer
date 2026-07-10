@@ -10,5 +10,16 @@
     "moe": "MoE router + expert dispatch",
     "bench": "benchmarks + eval harness (harness scripts are maintainer-owned)"
   },
-  "notes": "Tiers are maturity-adaptive: as the runtime nears the hardware ceiling, improvement is scored vs remaining headroom (roofline %). Full reward model: https://github.com/gittensor-ai-lab"
+  "notes": "Tiers are maturity-adaptive: as the runtime nears the hardware ceiling, improvement is scored vs remaining headroom (roofline %). Full reward model: https://github.com/gittensor-ai-lab",
+  "attribution_overrides": [
+    {
+      "date": "2026-07-10",
+      "issue": 334,
+      "credit_pr": 326,
+      "void_pr": 327,
+      "author": "inference2026",
+      "label": "XS",
+      "reason": "#327 merged then reverted (#332); false copycat close on #326. Emission credited to #326; #327 voided in dashboard."
+    }
+  ]
 }
