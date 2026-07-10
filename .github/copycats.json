@@ -66,5 +66,16 @@
     "strike": 0,
     "containment": 0.27,
     "note": "false positive cleared: per-function template-launch matched #195 at 100%; PR-level overlap 27%"
+  },
+  {
+    "pr": 338,
+    "author": "inference2026",
+    "original": 318,
+    "date": "2026-07-10",
+    "blocked": false,
+    "penalty_days": 0,
+    "strike": 0,
+    "containment": 1.0,
+    "note": "false positive cleared: 3-line GQA-4 g2 build fix; 100% literal overlap with #318 call-site boilerplate; same diff as #336 (merged first)"
   }
 ]

@@ -126,3 +126,10 @@ containment matched a 7-token `fa_split_gqa_kernel<...>` template instantiation 
 (100% boilerplate overlap); actual PR-level containment vs #195 was 27%. Maintainer
 cleared: removed from `blocked-contributors.txt`, label `copycat-cleared`, #326 reopened
 for eval.
+
+#338 was auto-blocked as ≥85% copycat of #318 — **false positive**: 3-line build fix
+routing the GQA-4 hd256 branch through `fa_launch_combine_dispatch_hd256` after #300
+removed `g2`; added lines matched #318's existing call-site pattern at 100% (tiny-PR
+literal rule). Independent convergent fix with #336 (merged ~14 min earlier).
+Maintainer cleared: label `copycat-cleared`, #338 reopened. Account was not on
+`blocked-contributors.txt`.
