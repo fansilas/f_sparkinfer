@@ -2457,26 +2457,26 @@ window.SPARKINFER = {
       {
         "label": "128",
         "color": "#D14D72",
-        "tps": 271.85,
+        "tps": 287.61,
         "ref_tps": 224.91
       },
       {
         "label": "512",
         "color": "#7B5DFF",
-        "tps": 268.04,
+        "tps": 283.3,
         "ref_tps": 225.1
       },
       {
         "label": "4k",
         "color": "#0E8A16",
-        "tps": 255.55,
+        "tps": 269.77,
         "ref_tps": 224.68
       }
     ]
   },
   "landed_qwen35": [
     {
-      "name": "requantize dense FFN down Q6_K→Q4_K",
+      "name": "requantize dense FFN down Q6",
       "tps": 271.85,
       "pr": 323,
       "date": "2026-07-10",
