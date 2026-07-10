@@ -98,7 +98,7 @@ def _bidir_baseline_args(q36, q35):
 
 
 def _apply_bidir_ctx_from_bres(bres, q36, q35):
-    """Fill QWEN36_BASE / QWYTHOS_BASE from bidir RESULT_JSON; return True if both models covered."""
+    """Fill QWEN36_BASE / QWYTHOS_BASE from bidir RESULT_JSON; return True if both models measured."""
     ctx_map = {
         "128": "ctx_128_tps", "512": "ctx_512_tps", "4k": "ctx_4096_tps",
         "16k": "ctx_16384_tps", "32k": "ctx_32768_tps",
@@ -107,20 +107,21 @@ def _apply_bidir_ctx_from_bres(bres, q36, q35):
     def _fill(score, store, keys):
         if not score:
             return False
-        ok = False
         for k in keys:
             v = float(score.get(ctx_map[k]) or 0)
-            if v > 0:
-                store[k] = v
-                ok = True
-        if "128" in keys and float(score.get("tps") or 0) > 0:
-            store["128"] = float(score["tps"])
-            ok = True
-        return ok
+            if v <= 0:
+                return False
+            store[k] = v
+        return True
 
     got36 = _fill(bres.get("score_qwen36"), q36, ("128", "512", "4k", "16k", "32k"))
     got35 = _fill(bres.get("score_qwen35"), q35, ("128", "512", "4k"))
     return got36 and got35
+
+
+def _bidir_baseline_sane(q36, q35):
+    """Reject dashboard stubs / failed sweeps (Qwen3.6 ~400+, Qwythos ~120+ on 5090)."""
+    return q36.get("128", 0) >= 200 and q35.get("128", 0) >= 80
 
 # Subsystem buckets for the deterministic area:<name> label (from a PR's top-level changed
 # dirs — no AI). Categorization/display only: SN74 scoring is speedup-only (the eval:* tier),
@@ -1276,7 +1277,7 @@ def main():
             "--eval-mode", "longctx", "--keep"]
     if args.bidir:
         bcmd += ["--bidir", "--primary-quant", args.primary_quant, "--baseline-only"]
-        bcmd += _bidir_baseline_args(QWEN36_BASE, QWYTHOS_BASE)
+        # Do NOT pass guard baselines here — evaluate_bidir must measure fresh on-box.
     if PINNED_INSTANCE and not ssh_box_enabled() and str(base_iid) == PINNED_INSTANCE:
         bcmd.append("--pinned")
     box_label = ssh_box_arg() if ssh_box_enabled() else f"instance {base_iid}"
@@ -1302,19 +1303,23 @@ def main():
     if args.bidir and not (bres.get("pass") or bres.get("score_qwen35") or bres.get("score_qwen36")):
         log = (br.stdout + br.stderr)[-1200:]
         print(f">> bidir baseline (origin/main) failed — aborting; no PRs graded.\n{log}"); return
+    if args.bidir:
+        if not _apply_bidir_ctx_from_bres(bres, QWEN36_BASE, QWYTHOS_BASE) or not _bidir_baseline_sane(QWEN36_BASE, QWYTHOS_BASE):
+            log = (br.stdout + br.stderr)[-1200:]
+            print(f">> bidir baseline measurement invalid (need live ctx sweep, not dashboard defaults) — "
+                  f"aborting; no PRs graded.\n{log}"); return
     if not args.bidir and (not bres.get("pass") or not bres.get("tps")):
         log = (br.stdout + br.stderr)[-1200:]
         print(f">> same-box baseline (origin/main) failed ({bres.get('label','no result')}) — "
               f"aborting; no PRs graded.\n{log}"); return
     if args.bidir:
-        run_baseline = float((bres.get("score_qwen36") or {}).get("tps") or bres.get("tps") or 0)
-        s36 = bres.get("score_qwen36") or {}
-        run_guard_128 = float(s36.get("ctx_128_tps") or run_baseline)
-        run_guard_512 = float(s36.get("ctx_512_tps") or 0)
-        run_guard_4k = float(s36.get("ctx_4096_tps") or 0)
-        run_guard_16k = float(s36.get("ctx_16384_tps") or run_baseline)
-        run_guard_32k = float(s36.get("ctx_32768_tps") or 0)
-        score_ctx = int(s36.get("score_context") or bres.get("score_context") or 128)
+        run_baseline = float(QWEN36_BASE["128"])
+        run_guard_128 = float(QWEN36_BASE["128"])
+        run_guard_512 = float(QWEN36_BASE["512"])
+        run_guard_4k = float(QWEN36_BASE["4k"])
+        run_guard_16k = float(QWEN36_BASE["16k"])
+        run_guard_32k = float(QWEN36_BASE["32k"])
+        score_ctx = 128
     else:
         run_baseline = bres["tps"]
         run_guard_128 = float(bres.get("ctx_128_tps") or bres.get("tps") or 0)
@@ -1344,65 +1349,12 @@ def main():
               f"Aborting; NO PRs graded. Re-run on a warm, stable box.")
         return
 
-    # Bidir: reuse ctx speeds from the baseline RESULT_JSON (no duplicate SSH sweeps).
+    # Bidir: ctx speeds already in QWEN36_BASE / QWYTHOS_BASE from baseline RESULT_JSON.
     if args.bidir:
-        if _apply_bidir_ctx_from_bres(bres, QWEN36_BASE, QWYTHOS_BASE):
-            print(f"  Qwen3.6 same-box main: 128={QWEN36_BASE['128']} 512={QWEN36_BASE['512']} "
-                  f"4k={QWEN36_BASE['4k']} 16k={QWEN36_BASE['16k']} 32k={QWEN36_BASE['32k']} tok/s")
-            print(f"  Qwythos ({args.primary_quant}) same-box main: "
-                  f"128={QWYTHOS_BASE['128']} 512={QWYTHOS_BASE['512']} 4k={QWYTHOS_BASE['4k']} tok/s")
-        elif _vast_sh:
-            ssh_ep = ssh_box_endpoint()
-            if ssh_ep:
-                host, port = ssh_ep
-            elif _vast_endpoint and _vast_info_of:
-                import vastai
-                v = vastai.VastAI()
-                info = _vast_info_of(v, base_iid)
-                host, port = _vast_endpoint(info) if info else (None, None)
-            else:
-                host = port = None
-
-            def _ctx_sweep(host, port, gguf, label, store, ctx_list=None):
-                B = "/root/sparkinfer/build/runtime/qwen3_gguf_bench"
-                tps = {}
-                sweep = ctx_list or [("128", 0), ("512", 512), ("4k", 4096),
-                                     ("16k", 16384), ("32k", 32768)]
-                for lbl, ctx in sweep:
-                    cmd = f"export PATH=/usr/local/cuda/bin:$PATH; {B} '{gguf}' 128 {ctx}"
-                    r = _vast_sh(host, port, cmd, timeout=600)
-                    m = re.search(r"decode\s+tg\s*:\s*([0-9.]+)", r.stdout + r.stderr)
-                    tps[lbl] = float(m.group(1)) if m else 0.0
-                    print(f"    [{label}] ctx={lbl} tps={tps[lbl]}")
-                if tps.get("128", 0) > 0:
-                    store["128"] = tps["128"]
-                    if "512" in tps:
-                        store["512"] = tps["512"] if tps["512"] > 0 else round(tps["128"] * 0.98, 2)
-                    if "4k" in tps:
-                        store["4k"]  = tps["4k"]  if tps["4k"]  > 0 else round(tps["128"] * 0.93, 2)
-                    if "16k" in tps:
-                        store["16k"] = tps["16k"] if tps["16k"] > 0 else store.get("16k", 0)
-                    if "32k" in tps:
-                        store["32k"] = tps["32k"] if tps["32k"] > 0 else store.get("32k", 0)
-                    parts = " ".join(f"{k}={store[k]}" for k in ("128", "512", "4k", "16k", "32k") if k in store)
-                    print(f"  {label} same-box main: {parts} tok/s")
-                else:
-                    print(f"  {label} bench failed — using config defaults")
-
-            if host and port:
-                _ctx_sweep(host, port, "/workspace/models36/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
-                           "Qwen3.6", QWEN36_BASE)
-                qmap = {
-                    "Q4_K_M": "Qwythos-9B-Claude-Mythos-5-1M-Q4_K_M.gguf",
-                    "Q8_0":   "Qwythos-9B-Claude-Mythos-5-1M-Q8_0.gguf",
-                    "BF16":   "Qwythos-9B-Claude-Mythos-5-1M-BF16.gguf",
-                }
-                qfile = qmap[args.primary_quant]
-                _ctx_sweep(host, port, f"/workspace/models35/{qfile}",
-                           f"Qwythos ({args.primary_quant})", QWYTHOS_BASE,
-                           ctx_list=[("128", 0), ("512", 512), ("4k", 4096)])
-            else:
-                print(f"  could not reach eval box for model bench — using config defaults")
+        print(f"  Qwen3.6 same-box main: 128={QWEN36_BASE['128']} 512={QWEN36_BASE['512']} "
+              f"4k={QWEN36_BASE['4k']} 16k={QWEN36_BASE['16k']} 32k={QWEN36_BASE['32k']} tok/s")
+        print(f"  Qwythos ({args.primary_quant}) same-box main: "
+              f"128={QWYTHOS_BASE['128']} 512={QWYTHOS_BASE['512']} 4k={QWYTHOS_BASE['4k']} tok/s")
 
     # Run all pending evals on the SAME instance: pass --keep so vast_eval.py never stops/destroys
     # the box mid-queue. The bot stops the instance once after ALL PRs finish (or if the instance

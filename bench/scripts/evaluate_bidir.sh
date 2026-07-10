@@ -48,8 +48,35 @@ P36_DIR="${PRIMARY36_MODELS_DIR:-${MODELS_DIR:-$ROOT/models}36}"
 QUANT="${PRIMARY_QUANT:-Q4_K_M}"
 echo ">> bidir: Qwen3.5=$P35_FILE (quant=$QUANT, ctx=128/512/4k) + Qwen3.6=$P36_FILE (ctx=128/512/4k/16k/32k)" >&2
 
+reap() { pkill -f llama-server 2>/dev/null || true; pkill -f qwen3_gguf 2>/dev/null || true; sleep 1; true; }
+
 if [ "$BASELINE_ONLY" = 1 ]; then
   echo ">> bidir baseline-only: ctx speed sweep on origin/main (skip PR build + dual eval)" >&2
+  reap
+  git -C "$ROOT" fetch -q origin main 2>/dev/null || true
+  git -C "$ROOT" checkout -qf origin/main
+  COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
+  _bl_mark="$ROOT/build/.baseline_commit"
+  _bl_head="$(git -C "$ROOT" rev-parse HEAD)"
+  if [ ! -x "$ROOT/build/runtime/qwen3_gguf_bench" ] || \
+     [ "$(cat "$_bl_mark" 2>/dev/null)" != "$_bl_head" ]; then
+    echo ">> baseline-only: building origin/main ($_bl_head) ..." >&2
+    rm -rf "$ROOT/build"
+    if ! NO_PREBUILT=1 ensure_sparkinfer "$ARCH"; then
+      printf 'RESULT_JSON {"commit": "%s", "tps": 0, "top1": 0, "kl": 99, "label": "REJECT", "reason": "baseline build failed", "pass": false, "mode": "bidir"}\n' "$COMMIT"
+      exit 0
+    fi
+    echo "$_bl_head" > "$_bl_mark"
+  fi
+  # Never trust dashboard defaults for the bot baseline — always re-measure on-box.
+  SPARKINFER_P36_GUARD_128_BASELINE=0
+  SPARKINFER_P36_GUARD_512_BASELINE=0
+  SPARKINFER_P36_GUARD_4K_BASELINE=0
+  SPARKINFER_P36_GUARD_16K_BASELINE=0
+  SPARKINFER_P36_GUARD_32K_BASELINE=0
+  SPARKINFER_P35_GUARD_128_BASELINE=0
+  SPARKINFER_P35_GUARD_512_BASELINE=0
+  SPARKINFER_P35_GUARD_4K_BASELINE=0
 else
   echo ">> [build] submission ($COMMIT) from source (sm_$ARCH) — shared by both models ..." >&2
   rm -rf "$ROOT/build"
@@ -59,8 +86,6 @@ else
     exit 0
   fi
 fi
-
-reap() { pkill -f llama-server 2>/dev/null || true; pkill -f qwen3_gguf 2>/dev/null || true; sleep 1; true; }
 
 run_model() {
   local role="$1" file="$2" repo="$3" tok="$4" frontier="$5"; shift 5
@@ -133,11 +158,13 @@ B36_512="${B36_512:-${SPARKINFER_P36_GUARD_512_BASELINE:-0}}"
 B36_4K="${B36_4K:-${SPARKINFER_P36_GUARD_4K_BASELINE:-0}}"
 B36_16K="${B36_16K:-${SPARKINFER_P36_GUARD_16K_BASELINE:-0}}"
 B36_32K="${B36_32K:-${SPARKINFER_P36_GUARD_32K_BASELINE:-0}}"
-[ "${B36_128}" = "0" ] && B36_128="300.16"
-[ "${B36_512}" = "0" ] && B36_512="296.76"
-[ "${B36_4K}"  = "0" ] && B36_4K="287.91"
-[ "${B36_16K}" = "0" ] && B36_16K="338.55"
-[ "${B36_32K}" = "0" ] && B36_32K="301.19"
+if [ "$BASELINE_ONLY" != 1 ]; then
+  [ "${B36_128}" = "0" ] && B36_128="300.16"
+  [ "${B36_512}" = "0" ] && B36_512="296.76"
+  [ "${B36_4K}"  = "0" ] && B36_4K="287.91"
+  [ "${B36_16K}" = "0" ] && B36_16K="338.55"
+  [ "${B36_32K}" = "0" ] && B36_32K="301.19"
+fi
 
 B35_128="${B35_128:-${SPARKINFER_P35_GUARD_128_BASELINE:-0}}"
 B35_512="${B35_512:-${SPARKINFER_P35_GUARD_512_BASELINE:-0}}"
@@ -158,6 +185,11 @@ P_DIFF_REF="${SPARKINFER_DIFFICULTY_REF_OVERRIDE:-365.85}"
 # Bot same-box baseline: one build + ctx speed sweep only (skip 4× evaluate.sh + accuracy).
 if [ "$BASELINE_ONLY" = 1 ]; then
   echo ">> bidir baseline-only: ctx sweep complete — skipping full dual-model eval" >&2
+  if [ "${B36_128:-0}" = "0" ] || [ "${B35_128:-0}" = "0" ]; then
+    echo ">> baseline-only FAILED: Qwen3.6=${B36_128:-0} Qwythos=${B35_128:-0} tok/s at 128 ctx" >&2
+    printf 'RESULT_JSON {"commit": "%s", "tps": 0, "top1": 0, "kl": 99, "label": "REJECT", "reason": "baseline ctx sweep failed (0 tok/s)", "pass": false, "mode": "bidir"}\n' "$COMMIT"
+    exit 0
+  fi
   B36_128="${B36_128:-0}"; B36_512="${B36_512:-0}"; B36_4K="${B36_4K:-0}"
   B36_16K="${B36_16K:-0}"; B36_32K="${B36_32K:-0}"
   B35_128="${B35_128:-0}"; B35_512="${B35_512:-0}"; B35_4K="${B35_4K:-0}"
