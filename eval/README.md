@@ -98,17 +98,21 @@ python eval/vast_eval.py --ssh HOST:PORT --bidir --primary-quant Q4_K_M --ref ma
 
 Eval runs through **Polaris** by default (`POLARIS=1`). The GPU box collects an unsigned
 attestation via `eval/polaris/judge.py`; the bot host submits it to Polaris for Intel TDX
-verification and uploads the signed receipt with the eval log.
+verification and uploads the signed receipt with the eval log. When TDX is unavailable (API
+timeout, 404, etc.), the bot falls back to **Ed25519** signing if
+`SPARKINFER_POLARIS_PRIVATE_KEY` is set.
 
 ```bash
 # .env.eval
 POLARIS=1
 POLARIS_API_KEY=pi_sk_...
+SPARKINFER_POLARIS_PRIVATE_KEY=...   # base64, 32 bytes — Ed25519 fallback
 POLARIS_API_BASE=https://polaris.computer
 
 ./eval/run_bot.sh              # Polaris on (default)
 ./eval/run_bot.sh --no-polaris # legacy unsigned path
 ./eval/run_polaris_test.sh     # end-to-end smoke test
+./eval/run_polaris_smoke.sh    # TDX or Ed25519 smoke from saved attestation
 ```
 
 Set `POLARIS=0` in `.env.eval` or pass `--no-polaris` to disable.

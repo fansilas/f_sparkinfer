@@ -3,6 +3,69 @@
 Notable changes to sparkinfer. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions track the GitHub [releases](https://github.com/gittensor-ai-lab/sparkinfer/releases).
 
+## [0.4.0] — 2026-07-11
+
+This release adds **Qwen3.5-9B (Qwythos)** as a first-class target and locks in **three-model** decode:
+**Qwen3-MoE**, **Qwen3.6-35B-A3B**, and **Qwen3.5-9B** — all beating llama.cpp on the same RTX 5090
+box. Qwen3.5 landed in under a day and is already **20%+ faster than llama.cpp** at 128/512/4k context;
+Qwen3.6 holds the **30%+ long-context lead** from v0.3.8 with no regression.
+
+### 🆕 Qwen3.5 (Qwythos-9B) — +24% past llama.cpp in one day
+
+Dense hybrid Gated-DeltaNet + full-attention · 9B · hd256 · Q4_K_M. Same RTX 5090, 128 generated tokens,
+`qwen3_gguf_bench` (3-rep median):
+
+| context | sparkinfer | llama.cpp | delta |
+|---|---:|---:|---:|
+| **128-token decode** | **279.8 tok/s** | 224.91 tok/s | **+24%** |
+| **512-context decode** | **277.9 tok/s** | 225.10 tok/s | **+23%** |
+| **4k-context decode** | **270.1 tok/s** | 224.68 tok/s | **+20%** |
+
+Landed in a single sprint: dense-hybrid loader, FFN down Q6→Q4 requant at load (#323), split-K + int8
+graph capture (#324), GQA-4 shared-KV tiles (#326), and bidirectional eval against Qwen3.6 guards.
+**`SPARKINFER_DOWN_REQUANT_Q4K` now defaults ON** (set `=0` to keep native Q6_K reads).
+
+### 🏁 Three models — all ahead of llama.cpp @128
+
+| model | sparkinfer @128 | llama.cpp | delta |
+|---|---:|---:|---:|
+| **Qwen3-MoE (30B-A3B)** | **480.7 tok/s** | 365.85 tok/s | **+31%** |
+| **Qwen3.6-35B-A3B** | **424.9 tok/s** | 275.81 tok/s | **+54%** |
+| **Qwen3.5-9B (Qwythos)** | **279.8 tok/s** | 224.91 tok/s | **+24%** |
+
+Qwen3.6 long-context ladder unchanged vs v0.3.8 (post-#300 MMA correctness rebench):
+
+| context | sparkinfer | llama.cpp | delta |
+|---|---:|---:|---:|
+| **128-token decode** | **424.9 tok/s** | 275.81 tok/s | **+54%** |
+| **512-context decode** | **420.1 tok/s** | 275.61 tok/s | **+52%** |
+| **4k-context decode** | **403.1 tok/s** | 276.30 tok/s | **+46%** |
+| **16k-context decode** | **386.4 tok/s** | 280.66 tok/s | **+38%** |
+| **32k-context decode** | **364.3 tok/s** | 279.83 tok/s | **+30%** |
+
+### Performance — landed since v0.3.8
+
+- **#318** (`eval:M`) — quantized dense FFN + GDN fusions + hd256 32k combine
+- **#323** (`eval:S`) — requantize dense FFN down Q6_K→Q4_K at load (~5% Qwythos decode)
+- **#324** (`eval:M`) — tune dense split-K and int8 graph capture for Qwen3.5
+- **#326** (`eval:XS`) — GQA-4 shared-KV tile for Qwythos dense attention
+- **#331** (`eval:XS`) — complete MoE gate_up→quant_h→down PDL chain for bs=1 decode
+- **#300** — hd256 MMA correctness fix in flash-decode split (no perf regression on release rebench)
+
+### Eval — Polaris Ed25519 fallback
+
+When Intel TDX is unavailable (Polaris API timeout/404), the eval bot falls back to **Ed25519-signed
+receipts** if `SPARKINFER_POLARIS_PRIVATE_KEY` is set — eval logs still ship a verifiable receipt.
+
+### The proof, in four layers
+
+1. **Speed** — three models, each **20–54%** over llama.cpp on the same GPU/GGUF; Qwen3.6 long-context lead held.
+2. **Correctness** — top-1 **≥ 0.95**, KL **≈ 0.01** vs llama.cpp on held-out prompts.
+3. **Same-box baseline** — bidirectional Qwen3.5 + Qwen3.6 eval with per-model no-regression guards.
+4. **Polaris** — TDX receipts when available; Ed25519 fallback when the enclave API is down.
+
+**Verified:** RTX 5090 · Qwen3.5 **280 tok/s** @128 · Qwen3.6 **425 tok/s** @128 · Qwen3-MoE **481 tok/s** @128.
+
 ## [0.3.8] — 2026-07-09
 
 This release adds **hardware-rooted trust** to the eval pipeline and locks in the Qwen3.6 speed story

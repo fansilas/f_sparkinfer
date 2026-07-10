@@ -167,6 +167,36 @@ class PrEvalBotPolicyTest(unittest.TestCase):
         by2 = {r["label"]: r["tps"] for r in data["qwen35"]["ctx"]}
         self.assertEqual(by2, by)
 
+    def test_polaris_tdx_falls_back_to_ed25519(self):
+        from eval.polaris.receipt import generate_keypair, verify_attestation
+
+        priv, _ = generate_keypair()
+        att = {
+            "code": {"commit": "abc1234"},
+            "references": {"model_sha256": "deadbeef", "eval_seed": "seed1"},
+            "measurements": {"tps": 100, "label": "S"},
+        }
+        with mock.patch("eval.polaris.client.PolarisClient") as mock_client_cls:
+            mock_client_cls.return_value.attest_scoring.side_effect = RuntimeError("HTTP 404")
+            receipt = bot.build_polaris_receipt_from_attestation(
+                att, api_key="pi_sk_test", privkey=priv, pubkey="dGVzdA==")
+        self.assertIsNotNone(receipt.get("signature"))
+        self.assertNotIn("tdx", receipt)
+        self.assertTrue(verify_attestation(att, receipt["signature"], receipt["public_key"]))
+
+    def test_polaris_ed25519_only_when_no_api_key(self):
+        from eval.polaris.receipt import generate_keypair
+
+        priv, _ = generate_keypair()
+        att = {
+            "code": {"commit": "def5678"},
+            "references": {"model_sha256": "cafebabe", "eval_seed": "seed2"},
+            "measurements": {"tps": 200, "label": "M"},
+        }
+        receipt = bot.build_polaris_receipt_from_attestation(att, api_key="", privkey=priv)
+        self.assertIsNotNone(receipt.get("signature"))
+        self.assertNotIn("tdx", receipt)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

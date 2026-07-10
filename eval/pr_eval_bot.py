@@ -755,6 +755,54 @@ def _scaled_context_tps(old_tps, measured_tps, guard_tps):
         return round(old_tps * (measured_tps / guard_tps), 2)
     return round(measured_tps, 2)
 
+def _load_polaris_privkey():
+    """Load SparkInfer Ed25519 signing key from SPARKINFER_POLARIS_PRIVATE_KEY (base64, 32 bytes)."""
+    import base64
+    key_b64 = os.environ.get("SPARKINFER_POLARIS_PRIVATE_KEY", "")
+    if not key_b64:
+        return None
+    try:
+        return base64.b64decode(key_b64)
+    except Exception as e:
+        print(f">> Polaris Ed25519 key load failed: {e}")
+        return None
+
+def build_polaris_receipt_from_attestation(attestation, api_key="", privkey=None, pubkey=""):
+    """Build a Polaris receipt: TDX via API when available, else Ed25519 fallback."""
+    if api_key:
+        try:
+            from eval.polaris.receipt import build_polaris_receipt
+            from eval.polaris.client import PolarisClient
+
+            nonce_input = (
+                attestation.get("code", {}).get("commit", "") +
+                attestation.get("references", {}).get("model_sha256", "") +
+                attestation.get("references", {}).get("eval_seed", "")
+            ).encode("utf-8")
+            nonce = hashlib.sha256(nonce_input).hexdigest()[:64]
+            polaris_resp = PolarisClient(api_key).attest_scoring(
+                attestation.get("measurements", {}),
+                nonce,
+                pubkey,
+            )
+            receipt = build_polaris_receipt(polaris_resp, attestation)
+            tee = polaris_resp.get("tee_attestation", {}) or {}
+            intel = (tee.get("verification", {}) or polaris_resp.get("verification", {}) or {}
+                     ).get("intel_verified")
+            print(f">> Polaris TDX: Intel verified={intel}")
+            return receipt
+        except Exception as e:
+            print(f">> Polaris TDX unavailable: {e}")
+            if not privkey:
+                raise
+            print(">> Polaris: falling back to Ed25519 signing")
+    if privkey:
+        from eval.polaris.receipt import build_receipt
+        receipt = build_receipt(attestation, privkey)
+        print(">> Polaris Ed25519: signed with SparkInfer key")
+        return receipt
+    return None
+
 def _upsert_context_baselines(data, e):
     """Update the displayed per-context live baselines from a merged longctx eval.
 
@@ -1149,11 +1197,10 @@ def main():
     }
 
     # --- Polaris verifiable compute ---
-    # Two modes, auto-selected:
-    #   TDX (preferred):  POLARIS_API_KEY is set → scoring runs inside Intel TDX enclave
-    #   Ed25519 (legacy): SPARKINFER_POLARIS_PRIVATE_KEY is set → bot signs attestations
+    # TDX (preferred): POLARIS_API_KEY → scoring inside Intel TDX enclave.
+    # Ed25519 fallback: SPARKINFER_POLARIS_PRIVATE_KEY when TDX is down or unset.
     # The private key NEVER touches the eval box — the bot signs/submits here on the bot host.
-    POLARIS_PRIVKEY = None
+    POLARIS_PRIVKEY = _load_polaris_privkey() if args.polaris else None
     POLARIS_API_KEY = os.environ.get("POLARIS_API_KEY", "")
     POLARIS_PUBKEY = ""  # SparkInfer's Ed25519 public key (used as e2e_pubkey for TDX)
 
@@ -1173,18 +1220,15 @@ def main():
             pass
 
         if POLARIS_API_KEY:
-            print(f">> Polaris TDX enabled — scoring will run inside Intel TDX enclave")
-        else:
-            _key_b64 = os.environ.get("SPARKINFER_POLARIS_PRIVATE_KEY", "")
-            if _key_b64:
-                try:
-                    POLARIS_PRIVKEY = _b64.b64decode(_key_b64)
-                    print(f">> Polaris Ed25519 enabled — receipts will be signed")
-                except Exception as e:
-                    print(f">> Polaris key load failed: {e} — attestations will NOT be signed")
+            if POLARIS_PRIVKEY:
+                print(">> Polaris TDX enabled (Ed25519 fallback if TDX unavailable)")
             else:
-                print(">> Polaris enabled but no POLARIS_API_KEY or SPARKINFER_POLARIS_PRIVATE_KEY set — "
-                      "attestations will be collected but NOT signed")
+                print(">> Polaris TDX enabled — scoring will run inside Intel TDX enclave")
+        elif POLARIS_PRIVKEY:
+            print(">> Polaris Ed25519 enabled — receipts will be signed")
+        else:
+            print(">> Polaris enabled but no POLARIS_API_KEY or SPARKINFER_POLARIS_PRIVATE_KEY set — "
+                  "attestations will be collected but NOT signed")
 
     dash = load_dash()
     frontier = dash["status"]["frontier_tps"] if dash else args.frontier   # live ledger frontier
@@ -1511,36 +1555,12 @@ def main():
             if polaris_line and res:
                 try:
                     attestation = json.loads(polaris_line[len("POLARIS_ATTESTATION "):])
-                    receipt = None
-
-                    if POLARIS_API_KEY:
-                        # --- TDX path: submit scoring to Polaris Intel TDX enclave ---
-                        from eval.polaris.receipt import build_polaris_receipt
-                        from eval.polaris.client import PolarisClient
-
-                        # Nonce binds the attestation to this specific eval
-                        nonce_input = (
-                            attestation.get("code", {}).get("commit", "") +
-                            attestation.get("references", {}).get("model_sha256", "") +
-                            attestation.get("references", {}).get("eval_seed", "")
-                        ).encode("utf-8")
-                        nonce = hashlib.sha256(nonce_input).hexdigest()[:64]
-
-                        client = PolarisClient(POLARIS_API_KEY)
-                        polaris_resp = client.attest_scoring(
-                            attestation.get("measurements", {}),
-                            nonce,
-                            POLARIS_PUBKEY,
-                        )
-                        receipt = build_polaris_receipt(polaris_resp, attestation)
-                        print(f">> Polaris TDX: Intel verified={polaris_resp.get('tee_attestation', {}).get('verification', {}).get('intel_verified')}")
-
-                    elif POLARIS_PRIVKEY:
-                        # --- Ed25519 path: sign attestation with SparkInfer private key ---
-                        from eval.polaris.receipt import build_receipt
-                        receipt = build_receipt(attestation, POLARIS_PRIVKEY)
-                        print(f">> Polaris Ed25519: signed with SparkInfer key")
-
+                    receipt = build_polaris_receipt_from_attestation(
+                        attestation,
+                        api_key=POLARIS_API_KEY,
+                        privkey=POLARIS_PRIVKEY,
+                        pubkey=POLARIS_PUBKEY,
+                    )
                     if receipt:
                         polaris_bundle = {"receipt": receipt, "attestation": attestation}
                         res["polaris_receipt_hash"] = receipt["receipt_id"][:16]

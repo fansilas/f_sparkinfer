@@ -14,29 +14,24 @@ ssh -i "$SSH_KEY" -o BatchMode=yes -p "$PORT" "root@${HOST}" \
 export POLARIS_SMOKE_ATTEST="$ATTEST"
 
 python3 <<'PY'
-import json, hashlib, os, sys
+import json, os, sys
 sys.path.insert(0, os.getcwd())
 a = json.load(open(os.environ.get("POLARIS_SMOKE_ATTEST", "/tmp/polaris_attestation.json")))
-from eval.polaris.client import PolarisClient
-from eval.polaris.receipt import build_polaris_receipt
 pub = next(l.strip() for l in open("eval/polaris/sparkinfer_eval.pub")
            if l.strip() and not l.startswith("#"))
-nonce = hashlib.sha256((
-    a.get("code", {}).get("commit", "") +
-    a.get("references", {}).get("model_sha256", "") +
-    a.get("references", {}).get("eval_seed", "")
-).encode()).hexdigest()[:64]
 print(f">> endpoint: {os.environ.get('POLARIS_API_BASE', 'https://polaris.computer')}/v1/attest")
-resp = PolarisClient(os.environ["POLARIS_API_KEY"]).attest_scoring(
-    a.get("measurements", {}), nonce, pub)
-receipt = build_polaris_receipt(resp, a)
-intel = resp.get("tee_attestation", {}).get("verification", {}).get("intel_verified")
+from eval.pr_eval_bot import build_polaris_receipt_from_attestation, _load_polaris_privkey
+privkey = _load_polaris_privkey()
+receipt = build_polaris_receipt_from_attestation(
+    a, api_key=os.environ.get("POLARIS_API_KEY", ""), privkey=privkey, pubkey=pub)
+intel = receipt.get("tdx", {}).get("verification", {}).get("intel_verified")
 if intel is None:
-    intel = resp.get("verification", {}).get("intel_verified")
+    intel = receipt.get("verification", {}).get("intel_verified")
+is_ed25519 = bool(receipt.get("signature")) and "tdx" not in receipt
 out = "/tmp/polaris_smoke_receipt.json"
 json.dump(receipt, open(out, "w"), indent=2)
-print(f">> Polaris OK: intel_verified={intel} receipt_id={receipt['receipt_id'][:16]}")
+print(f">> Polaris OK: intel_verified={intel} ed25519={is_ed25519} receipt_id={receipt['receipt_id'][:16]}")
 print(f">> receipt: {out}")
-if not intel:
+if not intel and not is_ed25519:
     sys.exit(1)
 PY

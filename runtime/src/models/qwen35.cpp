@@ -1090,13 +1090,12 @@ bool Qwen35Model::load_gguf(const std::string& path) {
         s.owned.push_back(d);
         return d;
     };
-    // Dense-FFN down: keep GGUF Q6_K by default, or (SPARKINFER_DOWN_REQUANT_Q4K=1)
-    // dequant->requant to Q4_K at load so decode reads 4.5 vs 6.5 bits/weight. The
-    // Q6_K upload is freed after the requant; qtype flips to 12 on success.
+    // Dense-FFN down: Q6_K in GGUF is requantized to Q4_K at load by default (~5% decode on
+    // Qwythos). Set SPARKINFER_DOWN_REQUANT_Q4K=0 to keep native Q6_K reads.
     auto dev_quant_down = [&](const std::string& name, int& qtype) -> const void* {
         const void* q6 = dev_quant(name, qtype);
         static int req = -1;
-        if (req < 0) { const char* e = getenv("SPARKINFER_DOWN_REQUANT_Q4K"); req = (e && e[0] == '1') ? 1 : 0; }
+        if (req < 0) { const char* e = getenv("SPARKINFER_DOWN_REQUANT_Q4K"); req = (e && e[0] == '0') ? 0 : 1; }
         if (!req || qtype != 14 || !q6) return q6;
         const GGUFTensor* t = g.tensor(name);
         const long nv = t->n_values;
