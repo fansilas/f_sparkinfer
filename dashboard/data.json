@@ -3,19 +3,19 @@
   "status": {
     "gpu": "RTX 5090 · sm_120 · CUDA 13",
     "model": "Qwen3-30B-A3B · Q4_K_M",
-    "frontier_tps": 484.79,
+    "frontier_tps": 522.18,
     "ref_name": "llama.cpp",
     "ref_tps": 365.85,
     "vram_gb": 21.4,
-    "token_match": 0.97,
-    "kl": 0.02,
+    "token_match": 0.9665,
+    "kl": 0.0261,
     "ref_note": "128-tok decode rerun on current main, same RTX 5090 · Q4_K_M GGUF",
     "longctx_16k_tps": 330.2,
     "longctx_2k_tps": 277.78,
     "longctx_token_match": 0.9426,
     "longctx_kl": 0.0368,
-    "longctx_512_tps": 469.58,
-    "longctx_4k_tps": 392.65,
+    "longctx_512_tps": 496.32,
+    "longctx_4k_tps": 414.5,
     "longctx_32k_tps": 260.3
   },
   "context_baselines": [
@@ -24,7 +24,7 @@
       "label": "128",
       "color": "#D14D72",
       "tokens": 128,
-      "sparkinfer_tps": 493.56,
+      "sparkinfer_tps": 522.18,
       "llamacpp_decode_tps": 365.85,
       "llamacpp_note": "128-token decode, no prefill context"
     },
@@ -33,7 +33,7 @@
       "label": "512",
       "color": "#7B5DFF",
       "tokens": 128,
-      "sparkinfer_tps": 469.58,
+      "sparkinfer_tps": 496.32,
       "llamacpp_decode_tps": 342.59,
       "llamacpp_note": "llama-batched-bench npp=512 ntg=128 npl=1"
     },
@@ -42,7 +42,7 @@
       "label": "4k",
       "color": "#0E8A16",
       "tokens": 128,
-      "sparkinfer_tps": 392.65,
+      "sparkinfer_tps": 414.5,
       "llamacpp_decode_tps": 292.99,
       "llamacpp_note": "llama-batched-bench npp=4096 ntg=128 npl=1"
     },
@@ -1784,6 +1784,12 @@
       "tps": 484.79,
       "pr": 122,
       "date": "2026-07-02"
+    },
+    {
+      "name": "requantize dense FFN down Q6",
+      "tps": 512.91,
+      "pr": 323,
+      "date": "2026-07-10"
     }
   ],
   "landed_longctx": [
