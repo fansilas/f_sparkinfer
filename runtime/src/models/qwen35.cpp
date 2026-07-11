@@ -334,6 +334,22 @@ int Qwen35Model::forward_token(int token_id, int position) {
         if ((long)seqlen > 28L * s.split_chunk && (long)seqlen <= 48L * s.split_chunk)
             want = Impl::MAX_NSPLITS;
         if ((long)seqlen > 64L * s.split_chunk) want = Impl::MAX_NSPLITS;
+        // int8-MMA split cap. The tensor-core flash-decode (fa_split_gqa_mma_i8_kernel) runs 5
+        // CTAs/SM; a num_kv_heads*256 grid (the MAX_NSPLITS tier above) spills a partial 2nd wave
+        // (tail) and shrinks the per-split chunk until the QK warps idle (gblk<8). The optimum is a
+        // grid that fills ~3/4 of one occupancy wave and is INDEPENDENT of seqlen — on RTX 5090
+        // (170 SMs) both 16k and 32k decode peak at the same grid (~640, i.e. n_splits 159 at 4 KV
+        // heads). The cap only bites for higher KV-head counts: hd128 Qwen3-MoE (4 KV) -> 159; hd256
+        // (2 KV -> cap 318, above the 256 tier) and short context stay unchanged. Composes with the
+        // banded policy above (it only lowers the MAX_NSPLITS long-context tier for hd128). The
+        // online-softmax combine is exact for any split count, so this is correctness-neutral.
+        if (s.kv->int8_kv() && s.kv->block_size() == 16 && c.head_dim == 128
+            && c.n_kv_heads > 0 && c.n_q_heads == c.n_kv_heads * 8) {
+            static int famma_on = [](){ const char* e = getenv("SPARKINFER_FAMMA"); return (e && e[0] == '0') ? 0 : 1; }();
+            static int nsm = [](){ int n = 0; cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, 0); return n > 0 ? n : 132; }();
+            const int cap = (nsm * 5 * 3 / 4) / c.n_kv_heads;   // ~3/4 of a 5-CTA/SM occupancy wave
+            if (famma_on && cap >= 32 && want > cap) want = cap;
+        }
         if (want > Impl::MAX_NSPLITS) want = Impl::MAX_NSPLITS;
         // hd256/GQA-8 occupancy correction (Qwen3.6 full-attention shape specifically): the
         // generic 128/256 thresholds above were tuned around the split kernel's assumed
