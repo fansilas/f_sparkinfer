@@ -3284,7 +3284,8 @@ window.SPARKINFER = {
   "qwen35": {
     "model": "Qwythos-9B (Qwen3.5-9B) · Q4_K_M",
     "hf_repo": "empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF",
-    "hf_avatar": "https://cdn-avatars.huggingface.co/v1/production/uploads/69987d75170a75bffd51a19a/halrHWh2hZXJ823MW4VRB.png",
+    "hf_avatar": "assets/img/empero-ai.webp",
+    "hf_downloads": 1967677,
     "arch": "dense hybrid Gated-DeltaNet + full-attn · 9B · hd256",
     "frontier_tps": 303.18,
     "baseline_tps": 283.18,

@@ -81,7 +81,9 @@
   .model-eq{font-weight:600;color:var(--muted);font-size:20px}
   .hf-model{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--title);font-family:"Work Sans",sans-serif}
   .hf-model:hover{color:var(--theme)}
-  .hf-model img{width:20px;height:20px;border-radius:50%;object-fit:cover;border:1px solid var(--line);flex:0 0 auto}
+  .hf-model img{width:20px;height:20px;border-radius:50%;object-fit:cover;border:1px solid var(--line);flex:0 0 auto;display:block}
+  .hf-model-name{line-height:1.2}
+  .hf-dl{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
   .sec-h .hint{font-size:13px;color:var(--muted)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;box-shadow:var(--shadow)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
@@ -260,7 +262,11 @@
     <div class="sec-h">
       <div class="sec-title-row">
         <h2>Qwen3.5 <span class="model-eq">(Qwythos)</span> · per-context</h2>
-        <a class="hf-model" id="detail-q35-hf" href="https://huggingface.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF" target="_blank" rel="noopener" title="empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF"></a>
+        <a class="hf-model" id="detail-q35-hf" href="https://huggingface.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF" target="_blank" rel="noopener" title="empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF">
+          <img src="assets/img/empero-ai.webp" alt="empero-ai" width="20" height="20" loading="lazy" decoding="async">
+          <span class="hf-model-name">empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF</span>
+          <span class="hf-dl" id="detail-q35-dl"></span>
+        </a>
       </div>
       <span class="hint">sparkinfer vs llama.cpp · 128 / 512 / 4k</span>
     </div>
@@ -310,9 +316,18 @@
     if (!el) return;
     el.href = `https://huggingface.co/${repo}`;
     el.title = repo;
-    const av = q.hf_avatar || "";
-    el.innerHTML = (av ? `<img src="${av}" alt="empero-ai" width="20" height="20" loading="lazy">` : "") +
-      `<span>${repo}</span>`;
+    const name = el.querySelector(".hf-model-name");
+    if (name) name.textContent = repo;
+    const img = el.querySelector("img");
+    if (img && q.hf_avatar) img.src = q.hf_avatar;
+    const fmtDl = n => {
+      if (!n) return "";
+      if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+      return String(n);
+    };
+    const dl = $("detail-q35-dl");
+    if (dl && q.hf_downloads) dl.textContent = `· ${fmtDl(q.hf_downloads)} downloads`;
   })();
 
   $("hero-meta").innerHTML = `GPU <b>${s.gpu}</b> &nbsp;·&nbsp; model <b>${s.model}</b>`;
