@@ -4103,8 +4103,8 @@ window.SPARKINFER = {
     "baseline_tps": 427.54,
     "ref_name": "llama.cpp",
     "ref_tps": 275.81,
-    "token_match": 0.9665,
-    "kl": 0.0203,
+    "token_match": 0.9529,
+    "kl": 0.031,
     "note": "same-box baseline 91.224.44.227 (origin/main 6e963a7, 2026-07-13)",
     "ctx": [
       {
