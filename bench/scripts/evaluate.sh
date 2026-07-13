@@ -65,27 +65,37 @@ GUARD_CTX="${SPARKINFER_GUARD_CTX:-0}"
 GUARD_512_CTX="${SPARKINFER_GUARD_512_CTX:-512}"
 GUARD_4K_CTX="${SPARKINFER_GUARD_4K_CTX:-4096}"
 GUARD_32K_CTX="${SPARKINFER_GUARD_32K_CTX:-32768}"
+GUARD_64K_CTX="${SPARKINFER_GUARD_64K_CTX:-65536}"
+GUARD_128K_CTX="${SPARKINFER_GUARD_128K_CTX:-131072}"
 DECODE_TOKENS="${SPARKINFER_DECODE_TOKENS:-128}"
 SCORE_REPS="${SPARKINFER_SCORE_REPS:-3}"
 GUARD_REPS="${SPARKINFER_GUARD_REPS:-1}"
 GUARD_512_REPS="${SPARKINFER_GUARD_512_REPS:-1}"
 GUARD_4K_REPS="${SPARKINFER_GUARD_4K_REPS:-1}"
 GUARD_32K_REPS="${SPARKINFER_GUARD_32K_REPS:-1}"
+GUARD_64K_REPS="${SPARKINFER_GUARD_64K_REPS:-0}"
+GUARD_128K_REPS="${SPARKINFER_GUARD_128K_REPS:-0}"
 GUARD_BASELINE="${SPARKINFER_GUARD_128_BASELINE:-${SPARKINFER_GUARD_2K_BASELINE:-0}}"
 GUARD_512_BASELINE="${SPARKINFER_GUARD_512_BASELINE:-0}"
 GUARD_4K_BASELINE="${SPARKINFER_GUARD_4K_BASELINE:-0}"
 GUARD_16K_BASELINE="${SPARKINFER_GUARD_16K_BASELINE:-0}"
 GUARD_32K_BASELINE="${SPARKINFER_GUARD_32K_BASELINE:-0}"
+GUARD_64K_BASELINE="${SPARKINFER_GUARD_64K_BASELINE:-0}"
+GUARD_128K_BASELINE="${SPARKINFER_GUARD_128K_BASELINE:-0}"
 GUARD_TOL="${SPARKINFER_GUARD_128_TOL:-${SPARKINFER_GUARD_2K_TOL:-0.98}}"
 GUARD_512_TOL="${SPARKINFER_GUARD_512_TOL:-$GUARD_TOL}"
 GUARD_4K_TOL="${SPARKINFER_GUARD_4K_TOL:-$GUARD_TOL}"
 GUARD_16K_TOL="${SPARKINFER_GUARD_16K_TOL:-$GUARD_TOL}"
 GUARD_32K_TOL="${SPARKINFER_GUARD_32K_TOL:-$GUARD_TOL}"
+GUARD_64K_TOL="${SPARKINFER_GUARD_64K_TOL:-$GUARD_TOL}"
+GUARD_128K_TOL="${SPARKINFER_GUARD_128K_TOL:-$GUARD_TOL}"
 LLAMA_128_BASELINE="${SPARKINFER_LLAMA_128_BASELINE:-365.85}"
 LLAMA_512_BASELINE="${SPARKINFER_LLAMA_512_BASELINE:-342.59}"
 LLAMA_4K_BASELINE="${SPARKINFER_LLAMA_4K_BASELINE:-292.99}"
 LLAMA_16K_BASELINE="${SPARKINFER_LLAMA_16K_BASELINE:-245.53}"
 LLAMA_32K_BASELINE="${SPARKINFER_LLAMA_32K_BASELINE:-192.62}"
+LLAMA_64K_BASELINE="${SPARKINFER_LLAMA_64K_BASELINE:-0}"
+LLAMA_128K_BASELINE="${SPARKINFER_LLAMA_128K_BASELINE:-0}"
 
 echo ">> [2/3] speed — ${EVAL_MODE} decode benchmark ..." >&2
 # M1: pin the GPU clock so the absolute tok/s is reproducible (not just same-box-cancelled). Best-
@@ -111,20 +121,22 @@ median_ctx() {  # $1=context tokens, $2=repetitions ; reps<=0 SKIPS the context 
 if [ "$EVAL_MODE" = "short" ]; then
   si_run qwen3_gguf_bench "$GGUF" 192 0 >/dev/null 2>&1 || true
   TPS="$(median_ctx 0 3)"
-  GUARD_TPS=0; GUARD_512_TPS=0; GUARD_4K_TPS=0; GUARD_32K_TPS=0
+  GUARD_TPS=0; GUARD_512_TPS=0; GUARD_4K_TPS=0; GUARD_32K_TPS=0; GUARD_64K_TPS=0; GUARD_128K_TPS=0
   GUARD_PASS=true; GUARD_512_PASS=true; GUARD_4K_PASS=true; GUARD_16K_PASS=true; ALL_GUARDS_PASS=true
   GUARD_RATIO=0; GUARD_512_RATIO=0; GUARD_4K_RATIO=0; GUARD_16K_RATIO=0
   SELECTED_TPS="$TPS"; SELECTED_FRONTIER="$FRONTIER"; SELECTED_CTX=128
   SELECTED_CONTEXT_LABEL="128-context"; BEST_CONTEXT_LABEL="128-context"; SELECTED_LLAMA_REF="$LLAMA_128_BASELINE"
   CONTEXT_GAINS_JSON='{}'
 else
-  echo ">> context policy: ${DECODE_TOKENS}-token decode at 128/512/4k/16k/32k; all contexts guarded; best context scores" >&2
+  echo ">> context policy: ${DECODE_TOKENS}-token decode at 128/512/4k/16k/32k/64k/128k (as configured); all measured contexts guarded; best context scores" >&2
   si_run qwen3_gguf_bench "$GGUF" 64 "$GUARD_CTX" >/dev/null 2>&1 || true
   GUARD_TPS="$(median_ctx "$GUARD_CTX" "$GUARD_REPS")"
   GUARD_512_TPS="$(median_ctx "$GUARD_512_CTX" "$GUARD_512_REPS")"
   GUARD_4K_TPS="$(median_ctx "$GUARD_4K_CTX" "$GUARD_4K_REPS")"
   TPS="$(median_ctx "$SCORE_CTX" "$SCORE_REPS")"
   GUARD_32K_TPS="$(median_ctx "$GUARD_32K_CTX" "$GUARD_32K_REPS")"
+  GUARD_64K_TPS="$(median_ctx "$GUARD_64K_CTX" "$GUARD_64K_REPS")"
+  GUARD_128K_TPS="$(median_ctx "$GUARD_128K_CTX" "$GUARD_128K_REPS")"
   GUARD_RATIO="$(python3 - <<PY
 base=float("$GUARD_BASELINE")
 cur=float("$GUARD_TPS")
@@ -152,6 +164,18 @@ PY
   GUARD_32K_RATIO="$(python3 - <<PY
 base=float("$GUARD_32K_BASELINE")
 cur=float("$GUARD_32K_TPS")
+print(0 if base <= 0 else cur / base)
+PY
+)"
+  GUARD_64K_RATIO="$(python3 - <<PY
+base=float("$GUARD_64K_BASELINE")
+cur=float("$GUARD_64K_TPS")
+print(0 if base <= 0 else cur / base)
+PY
+)"
+  GUARD_128K_RATIO="$(python3 - <<PY
+base=float("$GUARD_128K_BASELINE")
+cur=float("$GUARD_128K_TPS")
 print(0 if base <= 0 else cur / base)
 PY
 )"
@@ -190,6 +214,20 @@ tol=float("$GUARD_32K_TOL")
 print("true" if base <= 0 or cur >= base * tol else "false")
 PY
 )"
+  GUARD_64K_PASS="$(python3 - <<PY
+base=float("$GUARD_64K_BASELINE")
+cur=float("$GUARD_64K_TPS")
+tol=float("$GUARD_64K_TOL")
+print("true" if base <= 0 or cur >= base * tol else "false")
+PY
+)"
+  GUARD_128K_PASS="$(python3 - <<PY
+base=float("$GUARD_128K_BASELINE")
+cur=float("$GUARD_128K_TPS")
+tol=float("$GUARD_128K_TOL")
+print("true" if base <= 0 or cur >= base * tol else "false")
+PY
+)"
   SCORE_SELECT="$(python3 - <<PY
 import json
 contexts = [
@@ -198,6 +236,8 @@ contexts = [
   {"ctx":4096, "label":"4k-context", "tps":float("$GUARD_4K_TPS"), "base":float("$GUARD_4K_BASELINE"), "llama":float("$LLAMA_4K_BASELINE")},
   {"ctx":16384, "label":"16k-context", "tps":float("$TPS"), "base":float("$GUARD_16K_BASELINE") or float("$FRONTIER"), "llama":float("$LLAMA_16K_BASELINE")},
   {"ctx":32768, "label":"32k-context", "tps":float("$GUARD_32K_TPS"), "base":float("$GUARD_32K_BASELINE"), "llama":float("$LLAMA_32K_BASELINE")},
+  {"ctx":65536, "label":"64k-context", "tps":float("$GUARD_64K_TPS"), "base":float("$GUARD_64K_BASELINE"), "llama":float("$LLAMA_64K_BASELINE")},
+  {"ctx":131072, "label":"128k-context", "tps":float("$GUARD_128K_TPS"), "base":float("$GUARD_128K_BASELINE"), "llama":float("$LLAMA_128K_BASELINE")},
 ]
 for c in contexts:
     # The scoring base is the SAME-BOX origin/main measurement — not a passed-in frontier number.
@@ -258,11 +298,13 @@ if "$GUARD_512_PASS" != "true": labels.append("regression-512")
 if "$GUARD_4K_PASS" != "true": labels.append("regression-4k")
 if "$GUARD_16K_PASS" != "true": labels.append("regression-16k")
 if "$GUARD_32K_PASS" != "true": labels.append("regression-32k")
+if "$GUARD_64K_PASS" != "true": labels.append("regression-64k")
+if "$GUARD_128K_PASS" != "true": labels.append("regression-128k")
 print(json.dumps(labels, separators=(",", ":")))
 PY
 )"
   ALL_GUARDS_PASS="$(python3 - <<PY
-print("true" if all(x == "true" for x in ["$GUARD_PASS", "$GUARD_512_PASS", "$GUARD_4K_PASS", "$GUARD_16K_PASS", "$GUARD_32K_PASS"]) else "false")
+print("true" if all(x == "true" for x in ["$GUARD_PASS", "$GUARD_512_PASS", "$GUARD_4K_PASS", "$GUARD_16K_PASS", "$GUARD_32K_PASS", "$GUARD_64K_PASS", "$GUARD_128K_PASS"]) else "false")
 PY
 )"
   HAS_VERIFIED_CONTEXT_GAIN="$(python3 - <<PY
@@ -318,6 +360,8 @@ if "$EVAL_MODE" != "short":
     "ctx_4096_tps": round(float("$GUARD_4K_TPS"), 2),
     "ctx_16384_tps": round(float("$TPS"), 2),
     "ctx_32768_tps": round(float("$GUARD_32K_TPS"), 2),
+    "ctx_65536_tps": round(float("$GUARD_64K_TPS"), 2),
+    "ctx_131072_tps": round(float("$GUARD_128K_TPS"), 2),
     "guard_128_baseline": round(float("$GUARD_BASELINE"), 2),
     "guard_128_ratio": round(float("$GUARD_RATIO"), 4),
     "guard_128_tol": float("$GUARD_TOL"),
@@ -338,6 +382,14 @@ if "$EVAL_MODE" != "short":
     "guard_32k_ratio": round(float("$GUARD_32K_RATIO"), 4),
     "guard_32k_tol": float("$GUARD_32K_TOL"),
     "guard_32k_pass": "$GUARD_32K_PASS" == "true",
+    "guard_64k_baseline": round(float("$GUARD_64K_BASELINE"), 2),
+    "guard_64k_ratio": round(float("$GUARD_64K_RATIO"), 4),
+    "guard_64k_tol": float("$GUARD_64K_TOL"),
+    "guard_64k_pass": "$GUARD_64K_PASS" == "true",
+    "guard_128k_baseline": round(float("$GUARD_128K_BASELINE"), 2),
+    "guard_128k_ratio": round(float("$GUARD_128K_RATIO"), 4),
+    "guard_128k_tol": float("$GUARD_128K_TOL"),
+    "guard_128k_pass": "$GUARD_128K_PASS" == "true",
   })
 print(json.dumps(data, separators=(",", ":")))
 PY
@@ -351,6 +403,8 @@ guard512=float("$GUARD_512_TPS"); base512=float("$GUARD_512_BASELINE"); tol512=f
 guard4k=float("$GUARD_4K_TPS"); base4k=float("$GUARD_4K_BASELINE"); tol4k=float("$GUARD_4K_TOL")
 guard16k=float("$TPS"); base16k=float("$GUARD_16K_BASELINE"); tol16k=float("$GUARD_16K_TOL")
 guard32k=float("$GUARD_32K_TPS"); base32k=float("$GUARD_32K_BASELINE"); tol32k=float("$GUARD_32K_TOL")
+guard64k=float("$GUARD_64K_TPS"); base64k=float("$GUARD_64K_BASELINE"); tol64k=float("$GUARD_64K_TOL")
+guard128k=float("$GUARD_128K_TPS"); base128k=float("$GUARD_128K_BASELINE"); tol128k=float("$GUARD_128K_TOL")
 reasons = []
 if base > 0 and guard < base * tol:
     reasons.append(f"128-token decode no-regression gate: {guard:.2f} tok/s < {tol:.0%} of main {base:.2f} tok/s")
@@ -362,6 +416,10 @@ if base16k > 0 and guard16k < base16k * tol16k:
     reasons.append(f"16k-context decode no-regression gate: {guard16k:.2f} tok/s < {tol16k:.0%} of main {base16k:.2f} tok/s")
 if base32k > 0 and guard32k < base32k * tol32k:
     reasons.append(f"32k-context decode no-regression gate: {guard32k:.2f} tok/s < {tol32k:.0%} of main {base32k:.2f} tok/s")
+if base64k > 0 and guard64k < base64k * tol64k:
+    reasons.append(f"64k-context decode no-regression gate: {guard64k:.2f} tok/s < {tol64k:.0%} of main {base64k:.2f} tok/s")
+if base128k > 0 and guard128k < base128k * tol128k:
+    reasons.append(f"128k-context decode no-regression gate: {guard128k:.2f} tok/s < {tol128k:.0%} of main {base128k:.2f} tok/s")
 res = {
   "commit": "$COMMIT",
   "tps": round(tps, 2),
