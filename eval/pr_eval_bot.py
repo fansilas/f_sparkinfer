@@ -448,9 +448,28 @@ def _claimed_gain(before, after):
     """True when both numbers are present and after > before."""
     return before is not None and after is not None and after > before
 
+def _rtx5090_line(ln):
+    return "5090" in ln
+
+def rtx5090_has_checkbox(body):
+    """True when the PR body still has the template RTX 5090 markdown checkbox line."""
+    for ln in (body or "").splitlines():
+        if not _rtx5090_line(ln):
+            continue
+        if re.search(r"-\s*\[\s*[xX]\s*\]", ln) or re.search(r"-\s*\[\s*\]", ln):
+            return True
+    return False
+
 def rtx5090_box_checked(body):
     """True when the PR template's 'Tested on RTX 5090' checkbox is ticked."""
-    return any(re.search(r"\[\s*[xX]\s*\]", ln) and "5090" in ln for ln in (body or "").splitlines())
+    return any(
+        _rtx5090_line(ln) and re.search(r"-\s*\[\s*[xX]\s*\]", ln)
+        for ln in (body or "").splitlines()
+    )
+
+def rtx5090_should_close(body):
+    """True when the 5090 checkbox is present in the PR body but not ticked."""
+    return rtx5090_has_checkbox(body) and not rtx5090_box_checked(body)
 
 def greenlight_status(repo, num, pr_labels):
     """Decide whether a PR may be evaluated. Returns (status, reason):
