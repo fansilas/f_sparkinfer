@@ -1,18 +1,18 @@
 name: rtx5090-required
 
-# Close PRs that do not tick the template's "Tested on RTX 5090" checkbox.
-# Evaluation is opt-in — unchecked PRs are not kept in the open review queue.
+# Close PRs that leave the template "Tested on RTX 5090" checkbox unticked (`- [ ]`).
+# PRs that remove the proof section entirely (e.g. docs-only) are not auto-closed.
 #
 # Contributor flow after auto-close:
-#   1. Edit the PR description on the closed PR: tick the box + fill benchmark tables.
+#   1. Edit the PR description: tick `- [x] Tested on RTX 5090` + fill benchmark tables.
 #   2. Reopen the PR.
 #
 # Safe by design: pull_request_target never checks out or runs PR code — GitHub API only.
-# Draft PRs, bots, maintainers, and PRs labeled `hold` are exempt.
+# Draft PRs, bots, maintainers, and PRs labeled `hold` are exempt while draft/exempt.
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Close PRs without RTX 5090 attestation
+      - name: Close PRs with unticked RTX 5090 checkbox
         uses: actions/github-script@v7
         with:
           script: |
@@ -35,11 +35,23 @@ jobs:
             const EXEMPT_LOGIN = new Set(['ai-hpc']);
             const SKIP_LABELS = new Set(['hold']);
 
+            function rtx5090HasCheckbox(body) {
+              if (!body) return false;
+              return body.split('\n').some(ln => {
+                if (!ln.includes('5090')) return false;
+                return /-\s*\[\s*[xX]\s*\]/.test(ln) || /-\s*\[\s*\]/.test(ln);
+              });
+            }
+
             function rtx5090Checked(body) {
               if (!body) return false;
               return body.split('\n').some(ln =>
-                /\[\s*[xX]\s*\]/.test(ln) && ln.includes('5090')
+                ln.includes('5090') && /-\s*\[\s*[xX]\s*\]/.test(ln)
               );
+            }
+
+            function rtx5090ShouldClose(body) {
+              return rtx5090HasCheckbox(body) && !rtx5090Checked(body);
             }
 
             function exempt(pr) {
@@ -58,8 +70,8 @@ jobs:
                 core.info(`#${pr.number}: exempt — skip rtx5090 gate`);
                 return false;
               }
-              if (rtx5090Checked(pr.body)) {
-                core.info(`#${pr.number}: RTX 5090 box checked — ok`);
+              if (!rtx5090ShouldClose(pr.body)) {
+                core.info(`#${pr.number}: no unticked RTX 5090 checkbox — ok`);
                 return false;
               }
 
@@ -68,23 +80,25 @@ jobs:
                 owner, repo, issue_number: pr.number,
                 body:
                   '<!-- sparkinfer-rtx5090-required -->\n' +
-                  '## Closed — RTX 5090 attestation required\n\n' +
-                  'This PR was auto-closed because the **Tested on RTX 5090** checkbox in the ' +
-                  'PR template is not ticked.\n\n' +
-                  'Evaluation is opt-in and proof-gated. To submit for review:\n\n' +
-                  '1. **Edit this PR description** (you can edit while closed): tick ' +
-                  '`- [x] Tested on RTX 5090` — only if you actually ran on a 5090\n' +
+                  '## Closed — RTX 5090 checkbox not ticked\n\n' +
+                  'This PR was auto-closed because the template includes **Tested on RTX 5090** ' +
+                  'as `- [ ]` (unchecked). Evaluation is opt-in — tick the box only after a real ' +
+                  '5090 run.\n\n' +
+                  'To submit for review:\n\n' +
+                  '1. **Edit this PR description** (you can edit while closed): change to ' +
+                  '`- [x] Tested on RTX 5090`\n' +
                   '2. Fill the decode and/or prefill **before → after** tables with real ' +
                   '`bench/scripts/bench.sh` numbers showing improvement\n' +
                   '3. **Reopen** this PR\n\n' +
-                  'Unchecked PRs stay out of the RTX 5090 eval queue. See ' +
-                  `[CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/main/CONTRIBUTING.md).\n\n` +
+                  'If this PR does not need GPU eval (e.g. docs-only), remove the proof-of-speedup ' +
+                  'section from the description instead of leaving an unchecked box.\n\n' +
+                  `[CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/main/CONTRIBUTING.md)\n\n` +
                   '<sub>Automated by rtx5090-required CI. Maintainers and `hold` PRs are exempt.</sub>',
               });
               await github.rest.pulls.update({
                 owner, repo, pull_number: pr.number, state: 'closed',
               });
-              core.notice(`closed #${pr.number}: RTX 5090 box not checked`);
+              core.notice(`closed #${pr.number}: RTX 5090 checkbox unticked`);
               return true;
             }
 
@@ -100,11 +114,19 @@ jobs:
                 const full = await github.rest.pulls.get({
                   owner, repo, pull_number: pr.number,
                 });
+                const labels = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+                  owner, repo, issue_number: pr.number, per_page: 100,
+                });
+                full.data.labels = labels;
                 if (await maybeClose(full.data)) closed++;
               }
             } else {
               const num = context.payload.pull_request.number;
               const full = await github.rest.pulls.get({ owner, repo, pull_number: num });
+              const labels = await github.paginate(github.rest.issues.listLabelsOnIssue, {
+                owner, repo, issue_number: num, per_page: 100,
+              });
+              full.data.labels = labels;
               if (await maybeClose(full.data)) closed = 1;
             }
 
