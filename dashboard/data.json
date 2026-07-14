@@ -5373,6 +5373,7 @@
     "ref_tps": 275.81,
     "token_match": 0.9529,
     "kl": 0.031,
+    "vram_gb": 22.1,
     "note": "same-box baseline 91.224.44.227 (origin/main 6981821, 2026-07-14)",
     "ctx": [
       {
