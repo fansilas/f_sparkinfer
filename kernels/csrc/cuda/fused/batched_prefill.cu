@@ -17,6 +17,7 @@
 #include <mma.h>
 
 #include "sparkinfer/kernels/prefill.h"
+#include "sparkinfer/kernels/prefill_attn_mma.h"
 #include "sparkinfer/kernels/prefill_attn_window.h"
 
 namespace sparkinfer {
@@ -594,6 +595,12 @@ void launch_prefill_attn_int8_paged(
     const void* k_scale, const void* v_scale, const int* block_table, void* attn,
     int n_tokens, int n_q_heads, int n_kv_heads, int head_dim,
     int block_size, int max_blocks_per_seq, float scale, cudaStream_t stream) {
+    // int8 tensor-core prefill attention: same mask + online softmax as the scalar path below,
+    // run on the wmma int8 cores (the scalar kernels are compute-bound at ~8 TFLOP/s). Honours the
+    // same SPARKINFER_PREFILL_ATTN_WINDOW selection. SPARKINFER_PREFILL_ATTN_MMA=0 falls through.
+    if (launch_prefill_attn_mma(q, k_pool, v_pool, k_scale, v_scale, block_table, attn,
+            n_tokens, n_q_heads, n_kv_heads, head_dim, block_size, max_blocks_per_seq, scale, stream))
+        return;
     // Sink + sliding-window sparse prefill attention (StreamingLLM, matches the merged decode
     // sparse-KV #379): O(N*window) instead of O(N^2) at long context. Default on; returns false
     // (SPARKINFER_PREFILL_ATTN_WINDOW=0, or head_dim != 256) to fall through to full attention.
