@@ -254,7 +254,7 @@
   </section>
 
   <section>
-    <div class="sec-h"><h2>Qwen3.5 · optimization journey</h2><span class="hint" id="passes35-hint"></span></div>
+    <div class="sec-h"><h2>Qwen3.5 · prefill optimization journey</h2><span class="hint" id="passes35-hint"></span></div>
     <div class="card"><div id="passes35"></div></div>
   </section>
 
@@ -424,7 +424,7 @@
   // Reusable optimization-journey bar chart — each scored model (Qwen3-MoE, Qwen3.6) gets its own.
   const legItem=(c,t)=>`<span style="display:flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border-radius:3px;background:${c}"></span>${t}</span>`;
   const legWrap=items=>`<div style="display:flex;gap:18px;justify-content:center;margin-top:12px;font-size:12px;color:var(--body);flex-wrap:wrap">${items}</div>`;
-  function drawJourney(elId, pts, legendHtml){
+  function drawJourney(elId, pts, legendHtml, unit="tok/s"){
     if(!pts.length){ return; }
     const W=760,H=336,padL=12,padR=12,padT=30,padB=106, cw=W-padL-padR, ch=H-padT-padB;
     const maxT=Math.max(...pts.map(p=>p.tps)), slot=cw/pts.length, bw=Math.min(slot*0.56,60);
@@ -433,7 +433,7 @@
     const bars=pts.map((p,i)=>{
       const cx=padL+slot*i+slot/2, bh=Math.max(2,p.tps/maxT*ch), y=padT+ch-bh;
       const fill=p.fixed?"url(#gFixed)":(p.llama?"url(#gLlama)":(p.baseline?"url(#gPoc)":(p.long?"url(#gLong)":(p.live?"url(#gLive)":"url(#gHist)"))));
-      return `<g><title>${esc(p.name)} — ${esc(p.sub)} · ${p.tps} tok/s</title>`+
+      return `<g><title>${esc(p.name)} — ${esc(p.sub)} · ${p.tps} ${unit}</title>`+
         `<rect x="${(cx-bw/2).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="4" fill="${fill}"/>`+
         `<text x="${cx.toFixed(1)}" y="${(y-7).toFixed(1)}" text-anchor="middle" font-size="12" font-weight="700" fill="#06050B">${p.tps<1?p.tps:Math.round(p.tps)}</text>`+
         `<text x="${cx.toFixed(1)}" y="${(padT+ch+14).toFixed(1)}" text-anchor="end" transform="rotate(-45 ${cx.toFixed(1)} ${(padT+ch+14).toFixed(1)})" font-size="10.5" fill="#5b5b66">${esc(trunc(p.name))}</text></g>`;
@@ -465,13 +465,14 @@
       legItem("#D14D72","ai-hpc v0.3.3 long-context POC")+
       legItem("#B8860B","landed on context frontier")));
   })();
-  // Qwen3.5 journey — Qwythos-9B 128-tok decode frontier (merge-chronological).
+  // Qwen3.5 prefill journey — scored prefill pp tok/s (merge-chronological ratchet).
   (function(){
     const q = D.qwen35 || {};
-    const L = [...(D.landed_qwen35 || [])].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.pr||0)-(b.pr||0));
+    const L = [...(D.landed_qwen35_pp || [])].sort((a,b)=>(a.date||"").localeCompare(b.date||"")||(a.pr||0)-(b.pr||0));
+    const refPp = (q.pp||[]).find(x=>x.label==="32k")?.ref_pp || 0;
     const pts = [];
-    const base = q.baseline_tps;
-    if (base) pts.push({name:"origin/main", sub:"same-box baseline · 128-tok decode", tps:base, baseline:true});
+    const base = q.baseline_pp;
+    if (base) pts.push({name:"origin/main", sub:"same-box baseline · scored prefill", tps:base, baseline:true});
     pts.push(...L.filter(l=>!l.baseline).map(l=>{
       let sub=(l.pr?"PR #"+l.pr+" · ":"")+l.date+(l.label?" · eval:"+l.label:"");
       if(l.raw_tps && l.raw_tps!==l.tps) sub+=" · measured "+l.raw_tps;
@@ -479,18 +480,19 @@
     }));
     const h = $("passes35-hint");
     if (h) {
-      const f = q.frontier_tps || Math.max(0, ...L.map(l=>l.tps), base||0);
+      const f = q.prefill_frontier_pp || Math.max(0, ...L.map(l=>l.tps), base||0);
       const b = base || (pts.length ? pts[0].tps : f);
       if (b && f) {
-        h.textContent = `${b} → ${f} tok/s · 128-tok decode · ${q.ref_tps?((f/q.ref_tps)*100).toFixed(0)+'% of '+q.ref_name+' '+q.ref_tps:'—'}`;
+        h.textContent = `${b} → ${f} pp tok/s · 32k prefill · ${refPp?((f/refPp)*100).toFixed(0)+'% of '+q.ref_name+' '+refPp:'—'}`;
       }
     }
-    if (!pts.length && q.ref_tps) {
-      pts.push({name:"llama.cpp", sub:"reference · 128-tok decode", tps:q.ref_tps, llama:true, fixed:true});
+    if (!pts.length && refPp) {
+      pts.push({name:"llama.cpp", sub:"reference · 32k prefill", tps:refPp, llama:true, fixed:true});
     }
     drawJourney("passes35", pts,
       legWrap(legItem("#D14D72","origin/main baseline")+
-              legItem("#0E8A16","landed / eval frontier · RTX 5090")));
+              legItem("#0E8A16","landed / eval frontier · RTX 5090")),
+      "pp tok/s");
   })();
   // Qwen3.6 journey — its own frontier (hybrid Gated-DeltaNet MoE, scored 128/512/4k).
   (function(){

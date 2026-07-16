@@ -1445,8 +1445,11 @@ def sync_merged_dashboard(repo, limit=40):
     data = load_dash()
     if data is not None:
         before = json.dumps(data.get("landed_qwen35", []), sort_keys=True)
+        before_pp = json.dumps(data.get("landed_qwen35_pp", []), sort_keys=True)
         _rebuild_qwen35_journey(data)
-        if json.dumps(data.get("landed_qwen35", []), sort_keys=True) != before:
+        _rebuild_qwen35_pp_journey(data)
+        if (json.dumps(data.get("landed_qwen35", []), sort_keys=True) != before
+                or json.dumps(data.get("landed_qwen35_pp", []), sort_keys=True) != before_pp):
             data["updated"] = datetime.date.today().isoformat()
             write_dash(data)
             push_dash("dashboard: repair Qwen3.5 optimization journey")
@@ -1666,6 +1669,10 @@ def _qwen35_journey_tps(sub):
     """128-token decode headline for Qwen3.5 journey (not longctx best-context tps)."""
     return float(sub.get("ctx_128_tps") or sub.get("tps") or 0)
 
+def _qwen35_journey_pp(sub):
+    """Scored prefill headline for Qwen3.5 prefill optimization journey."""
+    return float(sub.get("prefill_tps") or 0)
+
 def _qwen35_baseline_from_prs(data):
     """Same-box origin/main 128-tok speed before the first landed Qwen3.5 optimization."""
     earliest_num, guard = None, None
@@ -1682,6 +1689,25 @@ def _qwen35_baseline_from_prs(data):
         if earliest_num is None or num < earliest_num:
             earliest_num, guard = num, float(g)
     return round(guard, 2) if guard is not None else None
+
+def _qwen35_pp_baseline_from_prs(data):
+    """Same-box origin/main prefill speed before the first landed Qwen3.5 prefill win."""
+    earliest_num, baseline = None, None
+    for e in data.get("prs", []):
+        if not (e.get("pass_qwen35") and e.get("label_qwen35") in SPEEDUP_LABELS):
+            continue
+        num = e.get("num")
+        if num is None:
+            continue
+        sub = e.get("score_qwen35") or e
+        if _qwen35_journey_pp(sub) <= 0:
+            continue
+        bl = sub.get("frontier_tps")
+        if bl is None or float(bl) <= 0:
+            continue
+        if earliest_num is None or num < earliest_num:
+            earliest_num, baseline = num, float(bl)
+    return round(baseline, 2) if baseline is not None else None
 
 def _rebuild_qwen35_journey(data):
     """Recompute landed_qwen35 + baseline/frontier from stored prs rows (merge-chronological).
@@ -1724,6 +1750,46 @@ def _rebuild_qwen35_journey(data):
     if landed:
         q35["frontier_tps"] = running
 
+def _rebuild_qwen35_pp_journey(data):
+    """Recompute landed_qwen35_pp + prefill baseline/frontier from stored prs rows."""
+    decode_dates = {m["pr"]: m.get("date") for m in data.get("landed_qwen35", []) if m.get("pr")}
+    existing_dates = {m["pr"]: m.get("date") for m in data.get("landed_qwen35_pp", []) if m.get("pr")}
+    existing_dates = {**decode_dates, **existing_dates}
+    pending = []
+    for e in data.get("prs", []):
+        if not (e.get("pass_qwen35") and e.get("label_qwen35") in SPEEDUP_LABELS):
+            continue
+        num = e["num"]
+        sub = e.get("score_qwen35") or e
+        raw = round(_qwen35_journey_pp(sub), 2)
+        if raw <= 0:
+            continue
+        short = re.sub(r"^\w+(\([^)]*\))?:\s*", "", e.get("title", ""))[:28]
+        pending.append({
+            "name": short or f"PR #{num}",
+            "raw_tps": raw,
+            "pr": num,
+            "date": existing_dates.get(num) or datetime.date.today().isoformat(),
+            "label": e.get("label_qwen35") or sub.get("prefill_label"),
+        })
+    pending.sort(key=lambda m: (m.get("date", ""), m.get("pr", 0)))
+    q35 = data.setdefault("qwen35", {})
+    bl = _qwen35_pp_baseline_from_prs(data)
+    if bl is not None:
+        q35["baseline_pp"] = bl
+    running = round(float(bl or 0), 2)
+    landed = []
+    for ent in pending:
+        raw = ent.pop("raw_tps")
+        running = round(max(running, raw), 2)
+        ent["tps"] = running
+        if raw != running:
+            ent["raw_tps"] = raw
+        landed.append(ent)
+    data["landed_qwen35_pp"] = landed
+    if landed:
+        q35["prefill_frontier_pp"] = running
+
 def record_merge(repo, num):
     """A frontier-advancing PR was MERGED → advance the displayed frontier by its verified same-box
     relative gain and add it to the journey (`landed`). Hardware-independent and merged-only;
@@ -1764,6 +1830,7 @@ def record_merge(repo, num):
             _upsert_qwen35_ctx(data, sub)
             _upsert_qwen35_pp(data, sub)
             _rebuild_qwen35_journey(data)
+            _rebuild_qwen35_pp_journey(data)
             changed = True
         if changed:
             data["updated"] = datetime.date.today().isoformat()

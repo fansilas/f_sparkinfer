@@ -7545,7 +7545,8 @@
         "pp": 14149.94,
         "ref_pp": 8153.53
       }
-    ]
+    ],
+    "baseline_pp": 288.16
   },
   "landed_qwen35": [
     {
@@ -7819,6 +7820,60 @@
       "pr": 267,
       "date": "2026-07-13",
       "label": "XL"
+    }
+  ],
+  "landed_qwen35_pp": [
+    {
+      "name": "skip LM head on prefill + de",
+      "pr": 387,
+      "date": "2026-07-15",
+      "label": "L",
+      "tps": 320.33
+    },
+    {
+      "name": "batched prompt prefill for Q",
+      "pr": 398,
+      "date": "2026-07-16",
+      "label": "XL",
+      "tps": 4150.42
+    },
+    {
+      "name": "int8 tensor-core prefill GEM",
+      "pr": 422,
+      "date": "2026-07-16",
+      "label": "XL",
+      "tps": 6096.4
+    },
+    {
+      "name": "windowed prefill attention f",
+      "pr": 455,
+      "date": "2026-07-16",
+      "label": "XL",
+      "tps": 6096.4,
+      "raw_tps": 4394.9
+    },
+    {
+      "name": "fp16 shared-memory tiles for",
+      "pr": 463,
+      "date": "2026-07-16",
+      "label": "M",
+      "tps": 6096.4,
+      "raw_tps": 5509.41
+    },
+    {
+      "name": "fused Q4K/Q6K->int8 dequant ",
+      "pr": 464,
+      "date": "2026-07-16",
+      "label": "XL",
+      "tps": 14057.87
+    },
+    {
+      "name": "int8 tensor-core prefill att",
+      "pr": 465,
+      "date": "2026-07-16",
+      "label": "XL",
+      "tps": 14057.87,
+      "raw_tps": 7828.06
     }
   ]
 }
