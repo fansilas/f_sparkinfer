@@ -68,9 +68,12 @@ __global__ void win_prefill_tiled_kernel(
     const int kv_head = head / (n_q_heads / n_kv_heads);
     const bool active = (qtok < n_tokens) && (head < n_q_heads);
 
-    extern __shared__ float smem[];
-    float* sK = smem;                       // [TK * HEAD_DIM]
-    float* sV = smem + TK * HEAD_DIM;       // [TK * HEAD_DIM]
+    // K/V tiles staged as half (2B): the values are dequantized from int8, so fp16 storage is
+    // lossless vs what's stored, and it halves both the smem footprint (unlocking a 2nd block/SM)
+    // and the smem bandwidth that limits this kernel. Dot products still accumulate in fp32.
+    extern __shared__ __half smem[];
+    __half* sK = smem;                      // [TK * HEAD_DIM]
+    __half* sV = smem + TK * HEAD_DIM;      // [TK * HEAD_DIM]
 
     float q_reg[ELEMS];
     if (active) {
@@ -96,26 +99,26 @@ __global__ void win_prefill_tiled_kernel(
             const size_t off = (ckt * n_kv_heads + kv_head) * HEAD_DIM + d;
             const float ksc = __half2float(k_scale[ckt * n_kv_heads + kv_head]);
             const float vsc = __half2float(v_scale[ckt * n_kv_heads + kv_head]);
-            sK[idx] = (float)k_pool[off] * ksc;
-            sV[idx] = (float)v_pool[off] * vsc;
+            sK[idx] = __float2half((float)k_pool[off] * ksc);
+            sV[idx] = __float2half((float)v_pool[off] * vsc);
         }
         __syncthreads();
         if (active) {
             const int klim = min(k0 + tk, qtok + 1);   // causal cutoff for this warp's query
             for (int kpos = k0; kpos < klim; kpos++) {
                 const int kk = kpos - k0;
-                const float* krow = sK + (size_t)kk * HEAD_DIM;
+                const __half* krow = sK + (size_t)kk * HEAD_DIM;
                 float partial = 0.f;
 #pragma unroll
-                for (int e = 0; e < ELEMS; e++) partial += q_reg[e] * krow[lane + e * 32];
+                for (int e = 0; e < ELEMS; e++) partial += q_reg[e] * __half2float(krow[lane + e * 32]);
                 const float score = win_warp_sum(partial) * scale;
                 const float m_new = fmaxf(m, score);
                 const float corr = __expf(m - m_new);
                 const float p = __expf(score - m_new);
                 l = l * corr + p;
-                const float* vrow = sV + (size_t)kk * HEAD_DIM;
+                const __half* vrow = sV + (size_t)kk * HEAD_DIM;
 #pragma unroll
-                for (int e = 0; e < ELEMS; e++) acc[e] = acc[e] * corr + p * vrow[lane + e * 32];
+                for (int e = 0; e < ELEMS; e++) acc[e] = acc[e] * corr + p * __half2float(vrow[lane + e * 32]);
                 m = m_new;
             }
         }
@@ -160,9 +163,11 @@ __global__ void win_prefill_windowed_kernel(
     };
     const int my_rs = active ? win_start(qtok) : 0;                 // this query's recent-window start
 
-    extern __shared__ float smem[];
-    float* sK = smem;
-    float* sV = smem + TK * HEAD_DIM;
+    // K/V tiles staged as half (2B): dequantized-from-int8 values store losslessly in fp16, which
+    // halves the smem footprint (2nd block/SM) and the smem bandwidth bottleneck. Dot in fp32.
+    extern __shared__ __half smem[];
+    __half* sK = smem;
+    __half* sV = smem + TK * HEAD_DIM;
 
     float q_reg[ELEMS];
     if (active) {
@@ -189,8 +194,8 @@ __global__ void win_prefill_windowed_kernel(
                 const int phys = block_table[blk];
                 const size_t ckt = (size_t)phys * block_size + within;
                 const size_t off = (ckt * n_kv_heads + kv_head) * HEAD_DIM + d;
-                sK[idx] = (float)k_pool[off] * __half2float(k_scale[ckt * n_kv_heads + kv_head]);
-                sV[idx] = (float)v_pool[off] * __half2float(v_scale[ckt * n_kv_heads + kv_head]);
+                sK[idx] = __float2half((float)k_pool[off] * __half2float(k_scale[ckt * n_kv_heads + kv_head]));
+                sV[idx] = __float2half((float)v_pool[off] * __half2float(v_scale[ckt * n_kv_heads + kv_head]));
             }
             __syncthreads();
             if (active) {
@@ -200,18 +205,18 @@ __global__ void win_prefill_windowed_kernel(
                     const bool inwin = (kpos >= my_rs) && (kpos <= qtok);
                     if (!insink && !inwin) continue;
                     const int kk = kpos - k0;
-                    const float* krow = sK + (size_t)kk * HEAD_DIM;
+                    const __half* krow = sK + (size_t)kk * HEAD_DIM;
                     float partial = 0.f;
 #pragma unroll
-                    for (int e = 0; e < ELEMS; e++) partial += q_reg[e] * krow[lane + e * 32];
+                    for (int e = 0; e < ELEMS; e++) partial += q_reg[e] * __half2float(krow[lane + e * 32]);
                     const float score = win_warp_sum(partial) * scale;
                     const float m_new = fmaxf(m, score);
                     const float corr = __expf(m - m_new);
                     const float p = __expf(score - m_new);
                     l = l * corr + p;
-                    const float* vrow = sV + (size_t)kk * HEAD_DIM;
+                    const __half* vrow = sV + (size_t)kk * HEAD_DIM;
 #pragma unroll
-                    for (int e = 0; e < ELEMS; e++) acc[e] = acc[e] * corr + p * vrow[lane + e * 32];
+                    for (int e = 0; e < ELEMS; e++) acc[e] = acc[e] * corr + p * __half2float(vrow[lane + e * 32]);
                     m = m_new;
                 }
             }
@@ -254,7 +259,7 @@ bool launch_prefill_attn_windowed(
 
     if (head_dim != 256) return false;   // only the hd256 full-attention layers are windowed
     constexpr int TQ = 16, TK = 32, HD = 256;
-    const size_t sm = (size_t)2 * TK * HD * sizeof(float);   // 64 KB smem: K + V tiles
+    const size_t sm = (size_t)2 * TK * HD * sizeof(__half);  // 32 KB smem: K + V tiles (half)
 
     static int win_blocks = [] {
         const char* e = getenv("SPARKINFER_PREFILL_ATTN_WINDOW");
