@@ -58,7 +58,13 @@
   .tcard a{font-size:12.5px;font-weight:600;margin-top:10px;display:inline-block}
   .arch{margin-left:auto;font-family:"Sora";font-size:10.5px;font-weight:700;color:var(--theme);background:rgba(123,93,255,.12);border:1px solid rgba(123,93,255,.35);border-radius:6px;padding:2px 7px;letter-spacing:.02em;white-space:nowrap}
   .badge-sota{display:inline-block;font-family:"Sora";font-size:10.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#1a1500;background:linear-gradient(135deg,var(--theme2),#e8ff6a);border:1px solid rgba(212,255,18,.55);border-radius:6px;padding:3px 9px;vertical-align:middle}
-  .sota-spotlight{position:relative;overflow:hidden;background:linear-gradient(135deg,#0c0a18 0%,#1a1238 55%,#241653 100%);border:1px solid rgba(123,93,255,.35);border-radius:18px;padding:26px 28px;color:#e8e4f7;box-shadow:0 14px 40px rgba(123,93,255,.18);margin-top:28px}
+  .sota-stack{display:grid;gap:14px;margin-top:28px}
+  .sota-spotlight{position:relative;overflow:hidden;background:linear-gradient(135deg,#0c0a18 0%,#1a1238 55%,#241653 100%);border:1px solid rgba(123,93,255,.35);border-radius:18px;padding:26px 28px;color:#e8e4f7;box-shadow:0 14px 40px rgba(123,93,255,.18)}
+  .sota-secondary{position:relative;overflow:hidden;background:linear-gradient(135deg,#12101c 0%,#1a1628 100%);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:18px 22px;color:#e8e4f7;display:grid;grid-template-columns:1.35fr 1fr;gap:18px;align-items:center}
+  .sota-secondary h4{color:#fff;font-size:20px;font-weight:800;line-height:1.2;margin-top:6px}
+  .sota-secondary p{font-size:13.5px;color:#b9b2d6;margin-top:8px}
+  .sota-secondary .sota-stats{grid-template-columns:repeat(3,1fr)}
+  .sota-secondary .sota-stat .n{font-size:20px}
   .sota-spotlight::before{content:"";position:absolute;inset:0;background:radial-gradient(520px 220px at 88% 0%,rgba(212,255,18,.14),transparent 60%),radial-gradient(420px 200px at 8% 100%,rgba(123,93,255,.28),transparent 55%);pointer-events:none}
   .sota-spotlight .inner{position:relative;z-index:1;display:grid;grid-template-columns:1.35fr 1fr;gap:24px;align-items:center}
   .sota-eyebrow{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--theme2)}
@@ -74,7 +80,15 @@
   .tcard.sota::before{background:linear-gradient(90deg,var(--theme2),var(--theme))}
   .cmp-card.sota{border-color:rgba(212,255,18,.45);background:linear-gradient(180deg,#fffef5 0%,#fbfbfd 100%);box-shadow:0 8px 24px rgba(184,134,11,.08)}
   .sec-sota .sec-title-row h2{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  @media(max-width:820px){.sota-spotlight .inner{grid-template-columns:1fr}.sota-stats{grid-template-columns:1fr 1fr}}
+  @media(max-width:820px){.sota-spotlight .inner,.sota-secondary{grid-template-columns:1fr}.sota-stats{grid-template-columns:1fr 1fr}}
+  details.collapse-sec > summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+  details.collapse-sec > summary::-webkit-details-marker{display:none}
+  details.collapse-sec > summary::after{content:"▸";color:var(--muted);font-size:15px;font-weight:700;flex:0 0 auto;transition:transform .15s ease}
+  details.collapse-sec[open] > summary::after{transform:rotate(90deg)}
+  details.collapse-sec:not([open]) > summary{margin-bottom:0}
+  details.collapse-sec .sec-h{margin-bottom:0;flex:1}
+  details.collapse-sec .sec-h h2{font-size:22px}
+  section:has(> details.collapse-sec:not([open])){padding:18px 0}
   /* hero image + card thumbnails (NVIDIA / MediaTek product imagery) */
   .hero-grid{display:grid;grid-template-columns:1.25fr 1fr;gap:34px;align-items:center;margin-top:26px}
   .hero-text .eyebrow{margin-top:0}
@@ -210,7 +224,7 @@
 
 <div class="wrap">
   <div class="kpis" id="kpis"></div>
-  <div class="sota-spotlight" id="sota-spotlight" aria-label="Primary SOTA model"></div>
+  <div class="sota-stack" id="sota-stack" aria-label="Primary eval targets"></div>
 
   <section>
     <div class="sec-h"><h2>Target GPUs</h2><span class="hint">NVIDIA Blackwell, on-device — consumer <code>sm_120</code> + edge <code>sm_121</code> (not datacenter sm_100)</span></div>
@@ -249,8 +263,12 @@
   </section>
 
   <section>
-    <div class="sec-h"><h2>Qwen3-MoE · optimization journey</h2><span class="hint" id="passes-hint"></span></div>
+  <details class="collapse-sec">
+    <summary>
+      <div class="sec-h"><h2>Qwen3-MoE 30B-A3B · optimization journey</h2><span class="hint" id="passes-hint"></span></div>
+    </summary>
     <div class="card"><div id="passes"></div></div>
+  </details>
   </section>
 
   <section>
@@ -279,18 +297,22 @@
   </section>
 
   <section>
-    <div class="sec-h">
-      <div class="sec-title-row">
-        <h2>Qwen3-MoE · per-context</h2>
-        <a class="hf-model" id="detail-q3-hf" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF" target="_blank" rel="noopener" title="Qwen/Qwen3-30B-A3B-GGUF">
-          <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
-          <span class="hf-model-name">Qwen/Qwen3-30B-A3B-GGUF</span>
-          <span class="hf-dl" id="detail-q3-dl"></span>
-        </a>
+  <details class="collapse-sec">
+    <summary>
+      <div class="sec-h">
+        <div class="sec-title-row">
+          <h2>Qwen3-MoE 30B-A3B · per-context</h2>
+          <a class="hf-model" id="detail-q3-hf" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF" target="_blank" rel="noopener" title="Qwen/Qwen3-30B-A3B-GGUF" onclick="event.stopPropagation()">
+            <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
+            <span class="hf-model-name">Qwen/Qwen3-30B-A3B-GGUF</span>
+            <span class="hf-dl" id="detail-q3-dl"></span>
+          </a>
+        </div>
+        <span class="hint">sparkinfer vs llama.cpp · 128 / 512 / 4k / 16k / 32k</span>
       </div>
-      <span class="hint">sparkinfer vs llama.cpp · 128 / 512 / 4k / 16k / 32k</span>
-    </div>
+    </summary>
     <div class="card" id="detail-q3"></div>
+  </details>
   </section>
 
   <section>
@@ -377,14 +399,19 @@
   const q36ctx512 = (q36.ctx||[]).find(x=>x.label==="512");
   const q36Lead = q36ctx128 && q36ctx128.ref_tps ? 100*(q36ctx128.tps - q36ctx128.ref_tps)/q36ctx128.ref_tps : null;
 
+  const q35 = D.qwen35 || {};
+  const q35ctx128 = (q35.ctx||[]).find(x=>x.label==="128");
+  const q35Lead = q35ctx128 && q35ctx128.ref_tps ? 100*(q35ctx128.tps - q35ctx128.ref_tps)/q35ctx128.ref_tps : null;
+
   $("hero-meta").innerHTML = `GPU <b>${s.gpu}</b> &nbsp;·&nbsp; SOTA target <b>Qwen3.6-35B-A3B</b> &nbsp;·&nbsp; guard <b>${s.model}</b>`;
   $("updated").textContent = "updated " + D.updated;
 
-  const sotaEl = $("sota-spotlight");
-  if (sotaEl && q36.frontier_tps) {
+  const sotaStack = $("sota-stack");
+  if (sotaStack && q36.frontier_tps) {
     const pctLlama = q36Lead != null ? (q36Lead>=0?"+":"")+q36Lead.toFixed(0)+"%" : "—";
     const pctAll = q36.ref_tps ? ((q36.frontier_tps/q36.ref_tps)*100).toFixed(0)+"%" : "—";
-    sotaEl.innerHTML = `<div class="inner">
+    const q35PctLlama = q35Lead != null ? (q35Lead>=0?"+":"")+q35Lead.toFixed(0)+"%" : "—";
+    sotaStack.innerHTML = `<div class="sota-spotlight"><div class="inner">
       <div>
         <div class="sota-eyebrow">Primary eval target</div>
         <h3><span class="badge-sota">SOTA</span> Qwen3.6-35B-A3B</h3>
@@ -400,7 +427,24 @@
         <div class="sota-stat"><div class="n">${pctLlama}</div><div class="l">vs ${q36.ref_name||"llama.cpp"} at 128</div></div>
         <div class="sota-stat"><div class="n">${pctAll}</div><div class="l">of ${q36.ref_name||"llama.cpp"} speed</div></div>
       </div>
-    </div>`;
+    </div></div>`+
+    (q35.frontier_tps ? `<div class="sota-secondary">
+      <div>
+        <div class="sota-eyebrow">Prefill &amp; decode target</div>
+        <h4>Qwen3.5 9B <span class="model-eq" style="font-size:16px;color:#b9b2d6">(Qwythos)</span></h4>
+        <p>${q35.arch || "dense hybrid Gated-DeltaNet + full-attn · 9B"}. Long-context prefill frontier and decode benchmarks on the same eval box.</p>
+        <a class="hf-model" href="https://huggingface.co/${q35.hf_repo||"empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF"}" target="_blank" rel="noopener" style="margin-top:10px;color:#e8e4f7">
+          <img src="${q35.hf_avatar||"assets/img/huggingface.svg"}" alt="Hugging Face" width="20" height="20">
+          <span class="hf-model-name" style="color:#fff;font-size:13px">${q35.hf_repo||"empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF"}</span>
+          ${q35.hf_downloads ? `<span class="hf-dl" style="color:#9a93bd">· ${fmtDl(q35.hf_downloads)} downloads</span>` : ""}
+        </a>
+      </div>
+      <div class="sota-stats">
+        <div class="sota-stat"><div class="n">${q35.frontier_tps} <span>tok/s</span></div><div class="l">128-tok decode</div></div>
+        <div class="sota-stat"><div class="n">${q35.prefill_frontier_pp ? Math.round(q35.prefill_frontier_pp).toLocaleString() : "—"} <span>pp/s</span></div><div class="l">32k prefill</div></div>
+        <div class="sota-stat"><div class="n">${q35PctLlama}</div><div class="l">vs ${q35.ref_name||"llama.cpp"} decode</div></div>
+      </div>
+    </div>` : "");
   }
 
   const kpiTps = q36ctx512?.tps || q36.frontier_tps || s.frontier_tps;
