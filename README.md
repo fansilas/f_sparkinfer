@@ -109,12 +109,6 @@ bench/scripts/accuracy.sh --download
 
 Your own model: `bench/scripts/bench.sh /path/to/model.gguf --tokens 256`. Options: [`bench/scripts/README.md`](bench/scripts/README.md).
 
-**OpenAI-compatible server** (`dev` branch): [`server/README.md`](server/README.md)
-
-```bash
-./server/run.sh --download   # http://127.0.0.1:8080/v1/chat/completions
-```
-
 ## Layout & scoring
 
 | Path | What |
