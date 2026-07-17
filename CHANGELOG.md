@@ -22,7 +22,7 @@ Dense hybrid Gated-DeltaNet + full-attention · Q4_K_M · RTX 5090. Prefill meas
 | **64k prefill** | **17,772** | 8,154 | **+118% (2.18×)** |
 
 Since v0.4.1 the prefill frontier rose **~55× at 4k** (290 → 16,083) and **~69× at 64k** (256 → 17,772).
-Decode on Qwythos stays **~303 tok/s @ 128** (+37% vs llama).
+Decode on Qwythos stays **~303 tok/s at 128** (+37% vs llama).
 
 ### 🌐 Demo + OpenAI API
 
@@ -48,9 +48,9 @@ SOTA decode unchanged since v0.4.1; every tracked context 128→32k stays **50%+
 - **#455** (`eval:XL`) — windowed prefill attention for long context
 - **#464** (`eval:XL`) — fused Q4K/Q6K→int8 dequant + lane-parallel attention — **+130%** on prior frontier
 - **#465** (`eval:XL`) — int8 tensor-core prefill attention
-- **#474** (`eval:XL`) — int8-native prefill GEMM (`mma.sync m16n8k32`) — frontier **16,083 pp/s @ 4k**
+- **#474** (`eval:XL`) — int8-native prefill GEMM (`mma.sync m16n8k32`) — frontier **16,083 pp/s at 4k**
 - **#506** — full `cache_prefix` integration for generate + server
-- **#355** — Qwen3.6 GDN `ssm_out` Q8→Q4 requant (+2.8% decode @ 128)
+- **#355** — Qwen3.6 GDN `ssm_out` Q8→Q4 requant (+2.8% decode at 128)
 
 ### Serving, trust & binaries
 
@@ -71,13 +71,13 @@ source-verified binaries inside the enclave, SparkDistill domain models, license
 
 | headline | v0.4.1 | v0.4.2 | shift |
 |---|---:|---:|---|
-| Qwythos prefill @ 4k | 291 pp/s (behind llama) | **16,083 pp/s (+45% vs llama)** | **55×** |
-| Qwythos prefill @ 64k | 256 pp/s (behind llama) | **17,772 pp/s (2.18× llama)** | **69×** |
-| Qwen3.6 decode @ 128 | 473 tok/s (+71%) | **473 tok/s (+71%)** | held |
+| Qwythos prefill at 4k | 291 pp/s (behind llama) | **16,083 pp/s (+45% vs llama)** | **55×** |
+| Qwythos prefill at 64k | 256 pp/s (behind llama) | **17,772 pp/s (2.18× llama)** | **69×** |
+| Qwen3.6 decode at 128 | 473 tok/s (+71%) | **473 tok/s (+71%)** | held |
 | Public demo | — | **[sparkinfer.com](https://sparkinfer.com/)** + **[api.sparkinfer.com](https://api.sparkinfer.com/)** | new |
 | Attested binaries | — | Linux + Windows CI builds | new |
 
-**Verified:** RTX 5090 · Qwythos prefill **17,772 pp/s @ 64k (2.18× llama)** · Qwen3.6 decode **473 tok/s (+71%)** ·
+**Verified:** RTX 5090 · Qwythos prefill **17,772 pp/s at 64k (2.18× llama)** · Qwen3.6 decode **473 tok/s (+71%)** ·
 Polaris-attested eval logs · GitHub Artifact Attestations on release binaries.
 
 ### Contributors
