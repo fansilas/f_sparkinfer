@@ -108,15 +108,21 @@
 
   section{padding:42px 0}
   .sec-h{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:18px;gap:12px;flex-wrap:wrap}
+  .sec-h--stack{flex-direction:column;align-items:flex-start;gap:10px}
   .sec-h h2{font-size:24px;font-weight:700}
   .sec-title-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .sec-title-row--stack{flex-direction:column;align-items:flex-start;gap:8px;width:100%}
   .model-eq{font-weight:600;color:var(--muted);font-size:20px}
   .hf-model{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:var(--title);font-family:"Work Sans",sans-serif}
   .hf-model:hover{color:var(--theme)}
+  .hf-model--stack{flex-direction:column;align-items:flex-start;gap:4px}
+  .hf-model-line{display:inline-flex;align-items:center;gap:6px}
   .hf-model img{width:22px;height:22px;border-radius:4px;object-fit:contain;background:transparent;padding:0;border:none;flex:0 0 auto;display:block}
   .hf-model-name{line-height:1.2}
-  .hf-dl{color:var(--muted);font-weight:500;font-size:12px;white-space:nowrap}
+  .hf-dl{color:var(--muted);font-weight:500;font-size:12px;line-height:1.3;padding-left:28px}
   .sec-h .hint{font-size:13px;color:var(--muted)}
+  .hint--split{display:flex;flex-direction:column;gap:2px;line-height:1.35}
+  .hint--split .hint-sub{font-size:12px;color:var(--muted)}
   .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;box-shadow:var(--shadow)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 
@@ -147,6 +153,18 @@
   .ctx-title{font-family:"Sora";font-weight:800;color:var(--title);font-size:13px;margin:10px 0 5px}
   .ctx-title span{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px}
   .ctx-note{margin-top:12px;text-align:center;color:var(--muted);font-size:13px}
+  .ctx-note--split{display:flex;flex-direction:column;gap:3px;line-height:1.35}
+  .ctx-note--split .ctx-note-sub{font-size:12px;color:var(--muted)}
+  .ctx-block{margin:14px 0;padding-bottom:14px;border-bottom:1px solid var(--line)}
+  .ctx-block:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+  .ctx-line{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:2px 0}
+  .ctx-line-lbl{display:flex;align-items:baseline;gap:8px;min-width:0}
+  .ctx-lbl{font-size:13.5px;color:var(--title);font-weight:600;font-family:"Sora",sans-serif}
+  .ctx-sub{font-size:11.5px;color:var(--muted);font-weight:400}
+  .ctx-val{font-family:"Sora";font-weight:700;font-size:14px;color:var(--title);white-space:nowrap}
+  .ctx-delta{color:var(--ok);font-weight:800;font-size:13px;margin-left:6px}
+  .ctx-delta.neg{color:var(--bad)}
+  .ctx-block .track{margin:5px 0 8px}
   .cmp-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
   .cmp-grid-3{grid-template-columns:repeat(3,1fr)}
   .cmp-card{border:1px solid var(--line);border-radius:12px;padding:16px;background:#fbfbfd;display:flex;flex-direction:column;gap:13px;min-width:0}
@@ -282,16 +300,21 @@
   </section>
 
   <section class="sec-sota">
-    <div class="sec-h">
-      <div class="sec-title-row">
+    <div class="sec-h sec-h--stack">
+      <div class="sec-title-row sec-title-row--stack">
         <h2>Qwen3.6-35B-A3B <span class="badge-sota">SOTA</span> · per-context</h2>
-        <a class="hf-model" id="detail-q36-hf" href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF" target="_blank" rel="noopener" title="unsloth/Qwen3.6-35B-A3B-GGUF">
-          <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
-          <span class="hf-model-name">unsloth/Qwen3.6-35B-A3B-GGUF</span>
+        <a class="hf-model hf-model--stack" id="detail-q36-hf" href="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF" target="_blank" rel="noopener" title="unsloth/Qwen3.6-35B-A3B-GGUF">
+          <span class="hf-model-line">
+            <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
+            <span class="hf-model-name">unsloth/Qwen3.6-35B-A3B-GGUF</span>
+          </span>
           <span class="hf-dl" id="detail-q36-dl"></span>
         </a>
       </div>
-      <span class="hint">sparkinfer vs llama.cpp · 128 / 512 / 4k / 16k / 32k</span>
+      <span class="hint hint--split">
+        <span>sparkinfer vs llama.cpp</span>
+        <span class="hint-sub">128 / 512 / 4k / 16k / 32k</span>
+      </span>
     </div>
     <div class="card" id="detail-q36"></div>
   </section>
@@ -299,16 +322,21 @@
   <section>
   <details class="collapse-sec">
     <summary>
-      <div class="sec-h">
-        <div class="sec-title-row">
+      <div class="sec-h sec-h--stack">
+        <div class="sec-title-row sec-title-row--stack">
           <h2>Qwen3-MoE 30B-A3B · per-context</h2>
-          <a class="hf-model" id="detail-q3-hf" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF" target="_blank" rel="noopener" title="Qwen/Qwen3-30B-A3B-GGUF" onclick="event.stopPropagation()">
-            <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
-            <span class="hf-model-name">Qwen/Qwen3-30B-A3B-GGUF</span>
+          <a class="hf-model hf-model--stack" id="detail-q3-hf" href="https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF" target="_blank" rel="noopener" title="Qwen/Qwen3-30B-A3B-GGUF" onclick="event.stopPropagation()">
+            <span class="hf-model-line">
+              <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
+              <span class="hf-model-name">Qwen/Qwen3-30B-A3B-GGUF</span>
+            </span>
             <span class="hf-dl" id="detail-q3-dl"></span>
           </a>
         </div>
-        <span class="hint">sparkinfer vs llama.cpp · 128 / 512 / 4k / 16k / 32k</span>
+        <span class="hint hint--split">
+          <span>sparkinfer vs llama.cpp</span>
+          <span class="hint-sub">128 / 512 / 4k / 16k / 32k</span>
+        </span>
       </div>
     </summary>
     <div class="card" id="detail-q3"></div>
@@ -316,24 +344,29 @@
   </section>
 
   <section>
-    <div class="sec-h">
-      <div class="sec-title-row">
+    <div class="sec-h sec-h--stack">
+      <div class="sec-title-row sec-title-row--stack">
         <h2>Qwen3.5 <span class="model-eq">(Qwythos)</span> · per-context</h2>
-        <a class="hf-model" id="detail-q35-hf" href="https://huggingface.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF" target="_blank" rel="noopener" title="empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF">
-          <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
-          <span class="hf-model-name">empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF</span>
+        <a class="hf-model hf-model--stack" id="detail-q35-hf" href="https://huggingface.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF" target="_blank" rel="noopener" title="empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF">
+          <span class="hf-model-line">
+            <img src="assets/img/huggingface.svg" alt="Hugging Face" width="22" height="22" loading="eager" decoding="async">
+            <span class="hf-model-name">empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF</span>
+          </span>
           <span class="hf-dl" id="detail-q35-dl"></span>
         </a>
       </div>
-      <span class="hint">sparkinfer vs llama.cpp · 128 / 4k / 32k / 64k / 128k decode</span>
+      <span class="hint hint--split">
+        <span>sparkinfer vs llama.cpp</span>
+        <span class="hint-sub">128 / 4k / 32k / 64k / 128k decode</span>
+      </span>
     </div>
     <div class="card" id="detail-q35"></div>
   </section>
 
   <section>
-    <div class="sec-h">
+    <div class="sec-h sec-h--stack">
       <h2>Qwen3.5 <span class="model-eq">(Qwythos)</span> · prefill</h2>
-      <span class="hint" id="detail-q35-pp-hint">sparkinfer vs llama.cpp · 4k / 32k / 64k context</span>
+      <span class="hint hint--split" id="detail-q35-pp-hint"></span>
     </div>
     <div class="card" id="detail-q35-pp"></div>
   </section>
@@ -387,7 +420,35 @@
     const img = el.querySelector("img");
     if (img) img.src = q.hf_avatar || "assets/img/huggingface.svg";
     const dl = dlId ? $(dlId) : null;
-    if (dl && q.hf_downloads) dl.textContent = `· ${fmtDl(q.hf_downloads)} downloads`;
+    if (dl && q.hf_downloads) dl.textContent = `${fmtDl(q.hf_downloads)} downloads`;
+  };
+
+  const splitNote = (main, sub) =>
+    `<div class="ctx-note ctx-note--split" style="margin-top:12px"><div>${main}</div><div class="ctx-note-sub">${sub}</div></div>`;
+
+  const renderDetailCompare = (rows, {sp, ref, label, sub, color}) => {
+    if (!rows.length) return "";
+    const maxT = Math.max(...rows.flatMap(x => [sp(x) || 0, ref(x) || 0]));
+    const fmt = v => v > 0 ? v.toFixed(2) : "pending";
+    const bar = v => Math.max(3, 100 * v / maxT);
+    return rows.map(x => {
+      const us = sp(x) || 0, them = ref(x) || 0;
+      const d = us > 0 && them > 0 ? 100 * (us - them) / them : null;
+      const col = color(x);
+      const sm = sub(x);
+      return `<div class="ctx-block">
+        <div class="ctx-line">
+          <div class="ctx-line-lbl"><span class="ctx-lbl">${label(x)}</span>${sm ? `<span class="ctx-sub">${sm}</span>` : ""}</div>
+          <div class="ctx-val">${fmt(us)}</div>
+        </div>
+        <div class="track"><div class="fill" style="width:${us > 0 ? bar(us) : 0}%;background:linear-gradient(90deg,${col},${col}88)"></div></div>
+        <div class="ctx-line">
+          <div class="ctx-line-lbl"><span class="ctx-lbl">llama.cpp</span></div>
+          <div class="ctx-val">${fmt(them)}${d != null ? `<span class="ctx-delta${d < 0 ? " neg" : ""}">${d >= 0 ? "+" : ""}${d.toFixed(1)}%</span>` : ""}</div>
+        </div>
+        <div class="track"><div class="fill them" style="width:${bar(them)}%;background:${LLAMA_FILL}"></div></div>
+      </div>`;
+    }).join("");
   };
 
   wireHfModel("detail-q3-hf", "detail-q3-dl", D.status, "Qwen/Qwen3-30B-A3B-GGUF");
@@ -600,46 +661,28 @@
   (function(){
     const rows = (D.context_baselines||[]).filter(x=>x.sparkinfer_tps && x.llamacpp_decode_tps);
     if (!rows.length) return;
-    const maxT = Math.max(...rows.flatMap(x=>[x.sparkinfer_tps, x.llamacpp_decode_tps]));
-    const fmt=v=>v.toFixed(2); const bar=v=>Math.max(3, 100*v/maxT);
-    const detailRows = rows.map(x=>{
-      const d=100*(x.sparkinfer_tps-x.llamacpp_decode_tps)/x.llamacpp_decode_tps;
-      const col=ctxColor(x.ctx);
-      return `<div class="bar-row">
-        <div class="nm">${CTX_LABEL[x.ctx]||x.ctx}<small>${x.ctx===128?"no prefill":"128 gen tok"}</small></div>
-        <div class="track"><div class="fill" style="width:${bar(x.sparkinfer_tps)}%;background:linear-gradient(90deg,${col},${col}88)"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.sparkinfer_tps)}</div>
-      </div>
-      <div class="bar-row">
-        <div class="nm">llama.cpp</div>
-        <div class="track"><div class="fill them" style="width:${bar(x.llamacpp_decode_tps)}%;background:${LLAMA_FILL}"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.llamacpp_decode_tps)} <span style="color:${d>=0?'var(--ok)':'var(--bad)'};font-weight:700;font-size:13px">${d>=0?'+':''}${d.toFixed(1)}%</span></div>
-      </div>`
-    }).join("");
-    $("detail-q3").innerHTML = `${detailRows}<div class="ctx-note" style="margin-top:12px">sparkinfer vs llama.cpp · same GPU · same Qwen3-30B Q4_K_M GGUF</div>`;
+    const detailRows = renderDetailCompare(rows, {
+      sp: x => x.sparkinfer_tps,
+      ref: x => x.llamacpp_decode_tps,
+      label: x => CTX_LABEL[x.ctx] || x.ctx,
+      sub: x => x.ctx === 128 ? "no prefill" : "128 gen tok",
+      color: x => ctxColor(x.ctx),
+    });
+    $("detail-q3").innerHTML = detailRows + splitNote("sparkinfer vs llama.cpp", "same GPU · same Qwen3-30B Q4_K_M GGUF");
   })();
 
   // Qwen3.5 per-context detail: 128 / 512 / 4k bars vs llama.cpp
   (function(){
     const rows = (D.qwen35?.ctx||[]).filter(x=>x.ref_tps);
     if (!rows.length) return;
-    const maxT = Math.max(...rows.flatMap(x=>[x.tps||0, x.ref_tps]));
-    const fmt=v=>v>0?v.toFixed(2):"pending"; const bar=v=>Math.max(3, 100*v/maxT);
-    const detailRows = rows.map(x=>{
-      const d=x.tps>0?100*(x.tps-x.ref_tps)/x.ref_tps:null;
-      const col=ctxColor(x.label==="4k"?4096:parseInt(x.label,10)||128);
-      return `<div class="bar-row">
-        <div class="nm">${x.label}<small>${x.label==="128"?"no prefill":"128 gen tok"}</small></div>
-        <div class="track"><div class="fill" style="width:${x.tps>0?bar(x.tps):0}%;background:linear-gradient(90deg,${col},${col}88)"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.tps)}</div>
-      </div>
-      <div class="bar-row">
-        <div class="nm">llama.cpp</div>
-        <div class="track"><div class="fill them" style="width:${bar(x.ref_tps)}%;background:${LLAMA_FILL}"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.ref_tps)}${d!=null?` <span style="color:${d>=0?'var(--ok)':'var(--bad)'};font-weight:700;font-size:13px">${d>=0?'+':''}${d.toFixed(1)}%</span>`:''}</div>
-      </div>`
-    }).join("");
-    $("detail-q35").innerHTML = `${detailRows}<div class="ctx-note" style="margin-top:12px">sparkinfer vs llama.cpp · same GPU · Qwythos-9B Q4_K_M GGUF · decode</div>`;
+    const detailRows = renderDetailCompare(rows, {
+      sp: x => x.tps || 0,
+      ref: x => x.ref_tps,
+      label: x => x.label,
+      sub: x => x.label === "128" ? "no prefill" : "128 gen tok",
+      color: x => ctxColor(x.label === "4k" ? 4096 : parseInt(x.label, 10) || 128),
+    });
+    $("detail-q35").innerHTML = detailRows + splitNote("sparkinfer vs llama.cpp", "same GPU · Qwythos-9B Q4_K_M GGUF · decode");
   })();
 
   // Qwen3.5 prefill detail: 4k / 32k / 64k pp vs llama.cpp
@@ -648,53 +691,36 @@
     const rows = (q.pp||[]).filter(x=>x.ref_pp);
     const hint = $("detail-q35-pp-hint");
     if (hint && q.prefill_frontier_pp) {
-      hint.textContent = `frontier ${q.prefill_frontier_pp} pp tok/s${q.prefill_label?' · eval-prefill:'+q.prefill_label:''} · 4k / 32k / 64k context`;
+      const evalTag = q.prefill_label ? ` · eval-prefill:${q.prefill_label}` : "";
+      hint.innerHTML = `<span>frontier ${q.prefill_frontier_pp} pp tok/s${evalTag}</span><span class="hint-sub">4k / 32k / 64k context</span>`;
     }
     if (!rows.length) {
       if ($("detail-q35-pp")) $("detail-q35-pp").innerHTML = `<div class="ctx-note">Prefill baselines pending — bidir eval with SPARKINFER_EVAL_PREFILL=1 populates this chart.</div>`;
       return;
     }
-    const maxT = Math.max(...rows.flatMap(x=>[x.pp||0, x.ref_pp]));
-    const fmt=v=>v>0?v.toFixed(2):"pending"; const bar=v=>Math.max(3, 100*v/maxT);
     const ppColor = lbl => ({"4k":"#0E8A16", "32k":"#6F42C1", "64k":"#E67E22"}[lbl]||"#7B5DFF");
-    const detailRows = rows.map(x=>{
-      const d=x.pp>0?100*(x.pp-x.ref_pp)/x.ref_pp:null;
-      const col=x.color||ppColor(x.label);
-      return `<div class="bar-row">
-        <div class="nm">${x.label}<small>prefill pp</small></div>
-        <div class="track"><div class="fill" style="width:${x.pp>0?bar(x.pp):0}%;background:linear-gradient(90deg,${col},${col}88)"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.pp)}</div>
-      </div>
-      <div class="bar-row">
-        <div class="nm">llama.cpp</div>
-        <div class="track"><div class="fill them" style="width:${bar(x.ref_pp)}%;background:${LLAMA_FILL}"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.ref_pp)}${d!=null?` <span style="color:${d>=0?'var(--ok)':'var(--bad)'};font-weight:700;font-size:13px">${d>=0?'+':''}${d.toFixed(1)}%</span>`:''}</div>
-      </div>`
-    }).join("");
-    $("detail-q35-pp").innerHTML = `${detailRows}<div class="ctx-note" style="margin-top:12px">sparkinfer vs llama.cpp · same GPU · Qwythos-9B Q4_K_M GGUF · prefill throughput (pp tok/s)</div>`;
+    const detailRows = renderDetailCompare(rows, {
+      sp: x => x.pp || 0,
+      ref: x => x.ref_pp,
+      label: x => x.label,
+      sub: () => "prefill pp",
+      color: x => x.color || ppColor(x.label),
+    });
+    $("detail-q35-pp").innerHTML = detailRows + splitNote("sparkinfer vs llama.cpp", "same GPU · Qwythos-9B Q4_K_M GGUF · prefill throughput (pp tok/s)");
   })();
 
   // Qwen3.6 per-context detail: 128 / 512 / 4k bars vs llama.cpp
   (function(){
     const rows = (D.qwen36?.ctx||[]).filter(x=>x.tps && x.ref_tps);
     if (!rows.length) return;
-    const maxT = Math.max(...rows.flatMap(x=>[x.tps, x.ref_tps]));
-    const fmt=v=>v.toFixed(2); const bar=v=>Math.max(3, 100*v/maxT);
-    const detailRows = rows.map(x=>{
-      const d=100*(x.tps-x.ref_tps)/x.ref_tps;
-      const col=ctxColor(x.label==="4k"?4096:x.label==="16k"?16384:x.label==="32k"?32768:parseInt(x.label,10)||128);
-      return `<div class="bar-row">
-        <div class="nm">${x.label}<small>${x.label==="128"?"no prefill":"128 gen tok"}</small></div>
-        <div class="track"><div class="fill" style="width:${bar(x.tps)}%;background:linear-gradient(90deg,${col},${col}88)"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.tps)}</div>
-      </div>
-      <div class="bar-row">
-        <div class="nm">llama.cpp</div>
-        <div class="track"><div class="fill them" style="width:${bar(x.ref_tps)}%;background:${LLAMA_FILL}"></div></div>
-        <div class="v" style="font-size:12px;color:var(--body);margin-left:8px">${fmt(x.ref_tps)}${d!=null?` <span style="color:${d>=0?'var(--ok)':'var(--bad)'};font-weight:700;font-size:13px">${d>=0?'+':''}${d.toFixed(1)}%</span>`:''}</div>
-      </div>`
-    }).join("");
-    $("detail-q36").innerHTML = `${detailRows}<div class="ctx-note" style="margin-top:12px">sparkinfer vs llama.cpp · same GPU · same Qwen3.6-35B-A3B UD-Q4_K_M GGUF</div>`;
+    const detailRows = renderDetailCompare(rows, {
+      sp: x => x.tps,
+      ref: x => x.ref_tps,
+      label: x => x.label,
+      sub: x => x.label === "128" ? "no prefill" : "128 gen tok",
+      color: x => ctxColor(x.label === "4k" ? 4096 : x.label === "16k" ? 16384 : x.label === "32k" ? 32768 : parseInt(x.label, 10) || 128),
+    });
+    $("detail-q36").innerHTML = detailRows + splitNote("sparkinfer vs llama.cpp", "same GPU · same Qwen3.6-35B-A3B UD-Q4_K_M GGUF");
   })();
 
   $("labels").innerHTML = D.labels.map(x=>`<span class="lg"><span class="dot" style="background:${x.c}"></span><b style="color:var(--title)">${x.l}</b> — ${x.d}</span>`).join("");
