@@ -3,6 +3,94 @@
 Notable changes to sparkinfer. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions track the GitHub [releases](https://github.com/gittensor-ai-lab/sparkinfer/releases).
 
+## [0.4.2] — 2026-07-17
+
+sparkinfer now **beats llama.cpp on Qwythos prefill at every tracked context** — climbing from **290 → 16,083 pp tok/s**
+at 4k and reaching **2.18× llama.cpp at 64k** (17,772 vs 8,154 pp tok/s). The first public demo is live at
+**[sparkinfer.com](https://sparkinfer.com/)** with an OpenAI-compatible API at **[api.sparkinfer.com](https://api.sparkinfer.com/)**.
+Qwen3.6 decode frontier holds at **473 tok/s (+71%)**. GitHub-attested **Linux + Windows** bench binaries ship with this release.
+
+### ⚡ Qwythos (Qwen3.5-9B) prefill — **2.18× llama.cpp at 64k**
+
+Dense hybrid Gated-DeltaNet + full-attention · Q4_K_M · RTX 5090. Prefill measured with `qwen3_gguf_bench`
+(`prefill pp` line); llama.cpp refs pinned in `reference.lock` (commit `6f4f53f`, 2026-07-13).
+
+| context | sparkinfer (pp tok/s) | llama.cpp (pp tok/s) | vs llama |
+|---|---:|---:|---:|
+| **4k prefill** | **16,083** | 11,105 | **+45%** |
+| **32k prefill** | **17,631** | 9,772 | **+80%** |
+| **64k prefill** | **17,772** | 8,154 | **+118% (2.18×)** |
+
+Since v0.4.1 the prefill frontier rose **~55× at 4k** (290 → 16,083) and **~69× at 64k** (256 → 17,772).
+Decode on Qwythos stays **~303 tok/s @ 128** (+37% vs llama).
+
+### 🌐 Demo + OpenAI API
+
+- **[sparkinfer.com](https://sparkinfer.com/)** — live chat demo, dashboard, SN74 competition story
+- **[api.sparkinfer.com](https://api.sparkinfer.com/)** — OpenAI-compatible demo API (`GET /v1/models`, `POST /v1/chat/completions`, streaming + `usage`)
+- **`sparkinfer-server`** — local OpenAI-compatible HTTP API with native C++ tokenizer (`server/README.md`)
+- **Continuous batching** — per-request KV sessions + prefix cache for multi-user serving (#520, #506)
+
+### 🏆 Qwen3.6-35B-A3B decode — frontier held
+
+SOTA decode unchanged since v0.4.1; every tracked context 128→32k stays **50%+ ahead** of llama.cpp.
+
+| context | sparkinfer | llama.cpp | delta |
+|---|---:|---:|---:|
+| **128-token decode** | **473.3 tok/s** | 275.81 tok/s | **+71%** |
+| **32k-context decode** | **427.6 tok/s** | 279.83 tok/s | **+53%** |
+
+### Prefill optimizations landed since v0.4.1
+
+- **#387** (`eval:L`) — skip LM head on prefill + dedicated prefill CUDA graph
+- **#398** (`eval:XL`) — batched prompt prefill (one weight-amortized GEMM pass) — **14×** jump at 4k
+- **#422** (`eval:XL`) — int8 tensor-core prefill GEMM
+- **#455** (`eval:XL`) — windowed prefill attention for long context
+- **#464** (`eval:XL`) — fused Q4K/Q6K→int8 dequant + lane-parallel attention — **+130%** on prior frontier
+- **#465** (`eval:XL`) — int8 tensor-core prefill attention
+- **#474** (`eval:XL`) — int8-native prefill GEMM (`mma.sync m16n8k32`) — frontier **16,083 pp/s @ 4k**
+- **#506** — full `cache_prefix` integration for generate + server
+- **#355** — Qwen3.6 GDN `ssm_out` Q8→Q4 requant (+2.8% decode @ 128)
+
+### Serving, trust & binaries
+
+- **#475** — `sparkinfer_server` OpenAI-compatible HTTP API
+- **#520** — `ContinuousBatchEngine` with right-sized per-request KV
+- **#472 / #521** — GitHub-attested `qwen3_gguf_bench` for **Linux** (`sparkinfer-v0.4.2-linux-x86_64-cuda13-sm120.tar.gz`) and **Windows** (`.zip`) with `BUILD_MANIFEST.json` + SHA256SUMS
+- **#518 / #519 / #522** — int8 QK-norm+RoPE correctness fix, 3-seed long-context accuracy probe, KL veto tightened to 1.0
+
+### Roadmap (updated)
+
+**Milestone 1 · Now** — fastest inference on every Blackwell edge GPU (RTX Spark, DGX Spark, 5090, PRO 6000);
+desktop app, RAG, memory; ecosystem compatibility as the fastest edge runtime.
+
+**Milestone 2 · Next** — trustable AI on confidential compute: TDX + NVIDIA CC attestation for `sparkinfer-server`,
+source-verified binaries inside the enclave, SparkDistill domain models, licensed on-prem for regulated enterprise.
+
+### What changed since v0.4.1
+
+| headline | v0.4.1 | v0.4.2 | shift |
+|---|---:|---:|---|
+| Qwythos prefill @ 4k | 291 pp/s (behind llama) | **16,083 pp/s (+45% vs llama)** | **55×** |
+| Qwythos prefill @ 64k | 256 pp/s (behind llama) | **17,772 pp/s (2.18× llama)** | **69×** |
+| Qwen3.6 decode @ 128 | 473 tok/s (+71%) | **473 tok/s (+71%)** | held |
+| Public demo | — | **[sparkinfer.com](https://sparkinfer.com/)** + **[api.sparkinfer.com](https://api.sparkinfer.com/)** | new |
+| Attested binaries | — | Linux + Windows CI builds | new |
+
+**Verified:** RTX 5090 · Qwythos prefill **17,772 pp/s @ 64k (2.18× llama)** · Qwen3.6 decode **473 tok/s (+71%)** ·
+Polaris-attested eval logs · GitHub Artifact Attestations on release binaries.
+
+### Contributors
+
+- **@James-CUDA** — #387 (prefill CUDA graph), #464 (fused dequant + lane-parallel attn)
+- **@fansilas** — #398 (batched prefill), #465 (int8 TC prefill attention)
+- **@inference2026** — #422 (int8 TC prefill GEMM), #463 (fp16 smem tiles)
+- **@Paral1995** — #455 (windowed prefill attn), #379 (sparse KV long decode)
+- **@blinkeye-lcm** — #474 (int8-native prefill GEMM), #355 (Qwen3.6 GDN requant)
+- **@ai-hpc** — #475 (sparkinfer-server), #476 (README/roadmap), #481 (OpenAI usage), #490 (batched prefill routing)
+- **@reyanthony062001-ops** — #389, #393 (hd256 correctness)
+- **@skyrocket2026** — #506 (cache_prefix), #520 (continuous batching), #472/#521 (attested binaries), eval harness + dashboard
+
 ## [0.4.1] — 2026-07-13
 
 sparkinfer now leads **llama.cpp by 70%+ on Qwen3.6-35B-A3B** — the project's primary **SOTA** open MoE —
