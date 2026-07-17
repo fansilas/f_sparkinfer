@@ -63,21 +63,21 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
     const int ffn  = c.moe_ffn;                          // 12288
     const int wide = 2 * qdim;                           // 8192 (qraw); also >= lqkv
     const size_t maxw = (size_t)ffn * H;                 // largest weight (gate/up/down)
+    // The dense FFN is processed in token-chunks so its ffn-wide scratch (ffg/ffu/A_i8) stays O(chunk)
+    // instead of O(N) — at long context those full-width buffers dominate and OOM (~8 GB @128k). The
+    // FFN is per-token independent, so chunking is numerically identical. Env override; default 32768.
+    const int ffn_chunk = []{ const char* e = getenv("SPARKINFER_PREFILL_FFN_CHUNK"); int c = e ? atoi(e) : 32768; return c > 0 ? c : 32768; }();
+    const int FC = (N < ffn_chunk) ? N : ffn_chunk;
     bf16* lin_conv_state = static_cast<bf16*>(s.lin_conv_state);
 
     // ---- scratch ----
     Arena a;
     bf16* x    = a.alloc<bf16>((size_t)N * H);
     bf16* xn   = a.alloc<bf16>((size_t)N * H);
-    bf16* hbuf = a.alloc<bf16>((size_t)N * H);
     bf16* hn   = a.alloc<bf16>((size_t)N * H);
     bf16* ao   = a.alloc<bf16>((size_t)N * H);
     bf16* b8   = a.alloc<bf16>((size_t)N * wide);        // qraw / lin_qkv (8192)
     bf16* lz   = a.alloc<bf16>((size_t)N * lvdim);       // lin_z (4096)
-    bf16* qb   = a.alloc<bf16>((size_t)N * qdim);        // full q (4096)
-    bf16* qg   = a.alloc<bf16>((size_t)N * qdim);        // full q-gate (4096)
-    bf16* kf   = a.alloc<bf16>((size_t)N * kvdim);       // full k (1024)
-    bf16* vf   = a.alloc<bf16>((size_t)N * kvdim);       // full v (1024)
     bf16* gq   = a.alloc<bf16>((size_t)N * s.linear_qdim);   // gdn q (2048)
     bf16* gk   = a.alloc<bf16>((size_t)N * s.linear_qdim);   // gdn k (2048)
     bf16* gv   = a.alloc<bf16>((size_t)N * lvdim);       // gdn v (4096)
@@ -85,9 +85,17 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
     bf16* lnrm = a.alloc<bf16>((size_t)N * lvdim);       // lin_norm (4096)
     bf16* la   = a.alloc<bf16>((size_t)N * vh);          // lin_alpha (32)
     bf16* lb   = a.alloc<bf16>((size_t)N * vh);          // lin_beta (32)
-    bf16* ffg  = a.alloc<bf16>((size_t)N * ffn);         // ffn gate (12288)
-    bf16* ffu  = a.alloc<bf16>((size_t)N * ffn);         // ffn up
-    bf16* ffh  = a.alloc<bf16>((size_t)N * ffn);         // ffn silu(gate)*up
+    // Full-attention scratch ALIASES the GDN scratch: a layer is either linear-attn (GDN) or full
+    // softmax-attn, never both, and qb/qg/kf/vf are pairwise-distinct within a full-attn layer while
+    // the GDN buffers they map onto are unused there (and vice-versa). Saves ~10K bf16/token of peak
+    // scratch at long context (each is <= its GDN host: qdim/kvdim <= lvdim/linear_qdim).
+    bf16* qb   = gv;                                     // full q      (4096) <- gdn v    (4096)
+    bf16* qg   = lnrm;                                   // full q-gate (4096) <- lin_norm (4096)
+    bf16* kf   = gq;                                     // full k      (1024) <- gdn q    (2048)
+    bf16* vf   = gk;                                     // full v      (1024) <- gdn k    (2048)
+    bf16* ffg  = a.alloc<bf16>((size_t)FC * ffn);        // ffn gate (12288), bounded to FC tokens
+    bf16* ffu  = a.alloc<bf16>((size_t)FC * ffn);        // ffn up,          bounded to FC tokens
+    bf16* ffh  = ffg;                                    // SwiGLU computed in-place into ffg (down reads it)
     bf16* wbuf = a.alloc<bf16>(maxw);                    // dequantized-weight scratch (reused)
     int*  d_ids = a.alloc<int>((size_t)N);
     if (!a.ok) { a.free_all(); fprintf(stderr, "[prefill] scratch alloc failed (ctx=%d) -> fallback\n", N); return -1; }
@@ -97,8 +105,19 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
     // its own arena so an alloc failure at huge N degrades to the bf16 GEMMs, not to the token loop.
     const char* _pi8 = getenv("SPARKINFER_PREFILL_I8");
     bool use_i8 = !(_pi8 && _pi8[0] == '0');
+    // Long-context fidelity: the near-1-decay GDN recurrence amplifies the per-row int8
+    // activation-quant error across the sequence, so int8 prefill diverges from the token-by-token
+    // path past ~96k (128k: top1 0.31 / KL 0.18). Above bf16_minctx (default 96k) fall back to bf16
+    // projections, which stay faithful (128k: top1 0.69 / KL 0.04) at ~half the prefill throughput —
+    // still ~26x the sequential token loop. Short/mid contexts keep int8 (full speed, unchanged).
+    // SPARKINFER_PREFILL_BF16_MINCTX overrides the threshold.
+    static int bf16_minctx = []{ const char* e = getenv("SPARKINFER_PREFILL_BF16_MINCTX"); return e ? atoi(e) : 98304; }();
+    if (N > bf16_minctx) use_i8 = false;
     Arena a8;
-    signed char* A_i8 = use_i8 ? a8.alloc<signed char>((size_t)N * ffn) : nullptr;
+    // A_i8 holds the quantized activation: non-FFN projs quantize N rows x K(<=H); the chunked FFN
+    // quantizes at most FC rows x ffn. Size to the max of the two (N*H dominates at the default chunk).
+    const size_t a_i8_sz = ((size_t)N * H > (size_t)FC * ffn) ? (size_t)N * H : (size_t)FC * ffn;
+    signed char* A_i8 = use_i8 ? a8.alloc<signed char>(a_i8_sz) : nullptr;
     signed char* W_i8 = use_i8 ? a8.alloc<signed char>(maxw) : nullptr;
     float* sx = use_i8 ? a8.alloc<float>((size_t)N) : nullptr;
     float* sw = use_i8 ? a8.alloc<float>((size_t)ffn) : nullptr;
@@ -113,21 +132,22 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
         return wbuf;
     };
     // C[N,n_out] = A[N,K] @ W^T  (W native quantized [n_out,K]).
-    auto proj = [&](const bf16* A, const void* W, int wtype, bf16* C, int n_out, int K) {
+    auto proj = [&](const bf16* A, const void* W, int wtype, bf16* C, int n_out, int K, int rows = 0) {
+        const int R = rows > 0 ? rows : N;   // rows (M) to process; chunked FFN passes a sub-N count
         // int8 only for the big weight-bound projections; keep the tiny per-v-head gate
         // projections (ssm_alpha/ssm_beta, n_out == v_heads) in bf16 — they feed the GDN
         // sigmoid gates, where per-row int8 quant of a 32-wide weight costs more accuracy
         // than the negligible time it saves.
         if (use_i8 && n_out >= 128) {
-            kernels::launch_prefill_quantize_rows_i8(A, A_i8, sx, N, K, st);
+            kernels::launch_prefill_quantize_rows_i8(A, A_i8, sx, R, K, st);
             // fused Q4_K/Q6_K -> int8 rows skips the dequant-to-bf16 scratch round trip
             if (!kernels::launch_gguf_dequant_rows_i8(wtype, W, W_i8, sw, n_out, K, st)) {
                 const void* wb = dq(W, wtype, n_out, K);
                 kernels::launch_prefill_quantize_rows_i8(wb, W_i8, sw, n_out, K, st);
             }
-            kernels::launch_prefill_gemm_i8(A_i8, W_i8, sx, sw, C, N, n_out, K, st);
+            kernels::launch_prefill_gemm_i8(A_i8, W_i8, sx, sw, C, R, n_out, K, st);
         } else {
-            kernels::launch_prefill_gemm(A, dq(W, wtype, n_out, K), C, N, n_out, K, st);
+            kernels::launch_prefill_gemm(A, dq(W, wtype, n_out, K), C, R, n_out, K, st);
         }
     };
 
@@ -180,18 +200,23 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
             proj(att, w.wo, w.wo_type, ao, H, qdim);
         }
 
-        // h = x + ao ; hn = RMSNorm(h, post_attn_norm)
-        kernels::launch_prefill_add(x, ao, hbuf, (long)N * H, st);
-        kernels::launch_rmsnorm(hbuf, w.post_attn_norm, hn, N, H, eps, st);
+        // x += ao (post-attn residual, in-place: hbuf folded into x) ; hn = RMSNorm(x, post_attn_norm)
+        kernels::launch_prefill_add(x, ao, x, (long)N * H, st);
+        kernels::launch_rmsnorm(x, w.post_attn_norm, hn, N, H, eps, st);
 
-        // dense SwiGLU FFN
-        proj(hn, w.gate_q, w.gate_qtype, ffg, ffn, H);
-        proj(hn, w.up_q,   w.up_qtype,   ffu, ffn, H);
-        kernels::launch_prefill_swiglu(ffg, ffu, ffh, (long)N * ffn, st);
-        proj(ffh, w.down_q, w.down_qtype, ao, H, ffn);
+        // dense SwiGLU FFN, chunked over tokens: ffg/ffu/A_i8 stay O(FC*ffn). Per-token independent,
+        // so this is numerically identical to the full-width pass; only the ffn-wide scratch shrinks.
+        for (int fo = 0; fo < N; fo += FC) {
+            const int fn = (N - fo < FC) ? (N - fo) : FC;
+            const bf16* hn_c = hn + (size_t)fo * H;
+            proj(hn_c, w.gate_q, w.gate_qtype, ffg, ffn, H, fn);
+            proj(hn_c, w.up_q,   w.up_qtype,   ffu, ffn, H, fn);
+            kernels::launch_prefill_swiglu(ffg, ffu, ffg, (long)fn * ffn, st);
+            proj(ffg, w.down_q, w.down_qtype, ao + (size_t)fo * H, H, ffn, fn);
+        }
 
-        // x = h + ffn_out ; xn = RMSNorm(x, next_input_norm)  (final_norm on the last layer)
-        kernels::launch_prefill_add(hbuf, ao, x, (long)N * H, st);
+        // x += ffn_out (in-place residual) ; xn = RMSNorm(x, next_input_norm)  (final_norm on last layer)
+        kernels::launch_prefill_add(x, ao, x, (long)N * H, st);
         const void* next_norm = (L + 1 < c.n_layers) ? s.w.layers[L + 1].input_norm : s.w.final_norm;
         kernels::launch_rmsnorm(x, next_norm, xn, N, H, eps, st);
     }

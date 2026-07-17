@@ -1113,8 +1113,11 @@ bool batched_prefill_enabled(bool gguf, const Qwen35Config& cfg, int n_tokens) {
     if (want_batched < 0) {
         const char* e = getenv("SPARKINFER_PREFILL_BATCHED");
         want_batched = (e && e[0] == '0') ? 0 : 1;
+        // 128k: the windowed prefill attention (#455) is O(N*window) and the FFN scratch is chunked
+        // (prefill_batched_run), so the batched pass now fits VRAM and stays flat ~18k pp up to 128k
+        // (vs the ~300 pp sequential fallback). Raised from 64k. SPARKINFER_PREFILL_BATCHED_MAXCTX overrides.
         const char* mc = getenv("SPARKINFER_PREFILL_BATCHED_MAXCTX");
-        batched_maxctx = mc ? atoi(mc) : 65536;
+        batched_maxctx = mc ? atoi(mc) : 131072;
     }
     return want_batched && gguf && cfg.hybrid && cfg.dense_ffn && n_tokens > 0 &&
            n_tokens <= batched_maxctx;
