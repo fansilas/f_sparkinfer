@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -131,6 +132,37 @@ bool decode_ids(const std::vector<int>& ids, std::string& text, std::string& err
     return true;
 }
 
+std::vector<int> load_prefix_token_ids() {
+    std::vector<int> out;
+    if (const char* csv = getenv("SPARKINFER_SERVER_PREFIX_TOKEN_IDS")) {
+        const char* p = csv;
+        while (*p) {
+            char* end = nullptr;
+            long v = strtol(p, &end, 10);
+            if (end == p) break;
+            out.push_back((int)v);
+            p = end;
+            while (*p == ',' || *p == ' ') p++;
+        }
+        return out;
+    }
+    const char* path = getenv("SPARKINFER_SERVER_PREFIX_TOKEN_FILE");
+    if (!path || !*path) return out;
+    std::ifstream f(path);
+    if (!f) {
+        fprintf(stderr, "[sparkinfer-server] WARN: cannot open prefix token file %s\n", path);
+        return out;
+    }
+    std::string s((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    for (size_t i = 0; i < s.size();) {
+        i = s.find_first_of("0123456789", i);
+        if (i == std::string::npos) break;
+        out.push_back(atoi(s.c_str() + i));
+        i = s.find_first_not_of("0123456789", i);
+    }
+    return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -174,6 +206,13 @@ int main(int argc, char** argv) {
 
     sparkinfer_server::ModelEngine engine;
     if (!engine.load(model_path, ctx > 0 ? ctx : 0)) return 1;
+
+    const std::vector<int> prefix_ids = load_prefix_token_ids();
+    if (!prefix_ids.empty()) {
+        engine.set_prefix_tokens(prefix_ids);
+        fprintf(stderr, "[sparkinfer-server] prefix cache: %zu tokens (batched prefill per request)\n",
+                prefix_ids.size());
+    }
 
     httplib::Server svr;
 

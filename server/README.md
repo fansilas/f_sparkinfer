@@ -83,26 +83,15 @@ curl ... -H 'Authorization: Bearer secret'
 
 Each `/v1/chat/completions` call runs through `Qwen35Model::generate()`:
 
-- Fresh KV cache allocation per request (`kv->allocate` / `kv->free`)
-- Hybrid Gated-DeltaNet recurrent state reset at position 0
+- Fresh KV allocation per request (`kv->allocate` / `kv->free` inside `generate()`)
+- Hybrid Gated-DeltaNet recurrent state reset at position 0 on cold prompts
 - Correct prefill path (interior prompt tokens skip LM head unless `SPARKINFER_PREFILL_LEGACY=1`)
+- Optional **shared prefix cache**: set `SPARKINFER_SERVER_PREFIX_TOKEN_FILE` (JSON array of token ids)
+  or `SPARKINFER_SERVER_PREFIX_TOKEN_IDS` (comma-separated). When the chat prompt starts with those
+  tokens, the server calls `cache_prefix()` (batched prefill) before `generate()`, which only
+  token-loops the suffix.
 
-Prior requests cannot leak context into later ones.
-
-## Jan integration (next)
-
-This server mirrors what Jan's `llamacpp-extension` expects from `llama-server`:
-
-- OpenAI `/v1/chat/completions` (+ SSE `stream: true`)
-- Local bind (`127.0.0.1`)
-- Optional Bearer auth
-
-Next steps on this branch or follow-up PRs:
-
-1. `POST /tokenize` for RAG
-2. Native tokenizer (drop Python helper)
-3. Multi-model load/unload router
-4. Jan `sparkinfer-extension` packaging
+Prior requests cannot leak decode context into later ones (KV is freed after each `generate()`).
 
 ## Env
 
@@ -112,3 +101,6 @@ Next steps on this branch or follow-up PRs:
 | `CTX` | `36864` (PRO 6000) / `0` (5090) | KV pool size passed as `--ctx` |
 | `SPARKINFER_KV_INT8` | model-dependent | Same as `qwen3_gguf_generate` |
 | `SPARKINFER_TOKENIZER_URL` | Qwen3-30B tokenizer | Override tokenizer download |
+| `SPARKINFER_SERVER_PREFIX_TOKEN_FILE` | — | JSON `[id,...]` warmed via `cache_prefix` each request |
+| `SPARKINFER_SERVER_PREFIX_TOKEN_IDS` | — | Comma-separated token ids (same as above) |
+| `SPARKINFER_PREFILL_BATCHED` | `1` | Batched prefill in `cache_prefix` / cold `generate` |

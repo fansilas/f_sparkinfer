@@ -10,8 +10,18 @@
 
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <algorithm>
 
 namespace sparkinfer_server {
+
+namespace {
+
+bool prompt_starts_with(const std::vector<int>& prompt, const std::vector<int>& prefix) {
+    if (prefix.empty() || prompt.size() < prefix.size()) return false;
+    return std::equal(prefix.begin(), prefix.end(), prompt.begin());
+}
+
+}  // namespace
 
 struct ModelEngine::Impl {
     std::string path;
@@ -20,6 +30,7 @@ struct ModelEngine::Impl {
     std::unique_ptr<sparkinfer::KVCacheManager> kv;
     std::unique_ptr<sparkinfer::moe::MoEEngine> engine;
     std::unique_ptr<sparkinfer::Qwen35Model> model;
+    std::vector<int> prefix_tokens;
     bool ready = false;
 };
 
@@ -126,6 +137,16 @@ int ModelEngine::max_seq() const {
     return impl_->ready ? impl_->cfg.max_seq : 0;
 }
 
+void ModelEngine::set_prefix_tokens(const std::vector<int>& tokens) {
+    std::lock_guard<std::mutex> lock(mu_);
+    impl_->prefix_tokens = tokens;
+}
+
+int ModelEngine::prefix_token_len() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return (int)impl_->prefix_tokens.size();
+}
+
 const std::string& ModelEngine::last_error() const {
     std::lock_guard<std::mutex> lock(mu_);
     return last_error_;
@@ -160,10 +181,21 @@ std::vector<int> ModelEngine::complete_streaming(const std::vector<int>& prompt_
         return {};
     }
 
-    // Use generate() so each request gets a fresh KV allocation, correct prefill
-    // (interior tokens skip LM head), hybrid recurrent-state reset at position 0,
-    // and kv->free() before the next request.
-    impl_->model->clear_prefix_cache();
+    // Warm a shared prefix with batched prefill when configured; generate() reuses it for the
+    // matching leading tokens and only token-loops the suffix.
+    if (!impl_->prefix_tokens.empty()) {
+        if (prompt_starts_with(prompt_ids, impl_->prefix_tokens)) {
+            if (!impl_->model->cache_prefix(impl_->prefix_tokens)) {
+                last_error_ = "cache_prefix failed (KV alloc or batched prefill)";
+                fprintf(stderr, "[sparkinfer-server] %s\n", last_error_.c_str());
+                return {};
+            }
+        } else {
+            impl_->model->clear_prefix_cache();
+        }
+    } else {
+        impl_->model->clear_prefix_cache();
+    }
     std::vector<int> out = impl_->model->generate(prompt_ids, max_new_tokens, nullptr);
     if (on_token) {
         for (int t : out) on_token(t);

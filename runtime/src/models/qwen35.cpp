@@ -1084,6 +1084,20 @@ bool prefill_samples_lmhead() {
     }
     return legacy != 0;
 }
+
+// Qwythos dense-hybrid batched prefill (prefill_batched_run). Default ON; SPARKINFER_PREFILL_BATCHED=0
+// disables. Batched fill runs from position 0 only; suffix-only reuse uses the token loop.
+bool batched_prefill_enabled(bool gguf, const Qwen35Config& cfg, int n_tokens) {
+    static int want_batched = -1, batched_maxctx = -1;
+    if (want_batched < 0) {
+        const char* e = getenv("SPARKINFER_PREFILL_BATCHED");
+        want_batched = (e && e[0] == '0') ? 0 : 1;
+        const char* mc = getenv("SPARKINFER_PREFILL_BATCHED_MAXCTX");
+        batched_maxctx = mc ? atoi(mc) : 65536;
+    }
+    return want_batched && gguf && cfg.hybrid && cfg.dense_ffn && n_tokens > 0 &&
+           n_tokens <= batched_maxctx;
+}
 } // namespace
 
 Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int context_tokens) {
@@ -1123,14 +1137,7 @@ Qwen35Model::BenchDecodeResult Qwen35Model::bench_decode(int warmup, int n, int 
     // naive) falls back to the token loop below, which is left byte-identical to main on purpose.
     bool batched_done = false;
     if (start_pos > 0) {
-        static int want_batched = -1, batched_maxctx = -1;
-        if (want_batched < 0) {
-            const char* e = getenv("SPARKINFER_PREFILL_BATCHED");
-            want_batched = (e && e[0] == '0') ? 0 : 1;
-            const char* mc = getenv("SPARKINFER_PREFILL_BATCHED_MAXCTX");
-            batched_maxctx = mc ? atoi(mc) : 65536;
-        }
-        if (want_batched && s.gguf && s.cfg.hybrid && s.cfg.dense_ffn && start_pos <= batched_maxctx) {
+        if (batched_prefill_enabled(s.gguf, s.cfg, start_pos)) {
             std::vector<int> ids(start_pos);
             for (int i = 0; i < start_pos; i++) ids[i] = 100 + (i % 20000);   // deterministic pseudo-prompt
             auto pb0 = std::chrono::high_resolution_clock::now();
@@ -1218,6 +1225,27 @@ bool Qwen35Model::prompt_matches_prefix(const std::vector<int>& prompt) const {
     return true;
 }
 
+int Qwen35Model::ingest_prompt_range(const int* ids, int start, int end) {
+    Impl& s = *p_;
+    if (!ids || end <= start) return -1;
+    const int n = end - start;
+    if (start == 0 && batched_prefill_enabled(s.gguf, s.cfg, n)) {
+        int seed = prefill_batched(ids, n);
+        if (seed >= 0 && seed < s.cfg.vocab) return seed;
+    }
+    int next = -1;
+    if (prefill_samples_lmhead()) {
+        for (int i = start; i < end; i++)
+            next = forward_token(ids[i], i, true);
+    } else {
+        for (int i = start; i + 1 < end; i++)
+            forward_token(ids[i], i, false);
+        if (end > start)
+            next = forward_token(ids[end - 1], end - 1, true);
+    }
+    return next;
+}
+
 bool Qwen35Model::cache_prefix(const std::vector<int>& tokens) {
     Impl& s = *p_;
     clear_prefix_cache();
@@ -1225,15 +1253,11 @@ bool Qwen35Model::cache_prefix(const std::vector<int>& tokens) {
     if (tokens.size() > (size_t)s.cfg.max_seq) return false;
     invalidate_decode_graph();
     if (!s.kv->allocate(s.seq_id, s.cfg.max_seq)) return false;
-    int next = -1;
-    if (prefill_samples_lmhead()) {
-        for (size_t i = 0; i < tokens.size(); i++)
-            next = forward_token(tokens[i], (int)i, true);
-    } else {
-        for (size_t i = 0; i + 1 < tokens.size(); i++)
-            forward_token(tokens[i], (int)i, false);
-        if (!tokens.empty())
-            next = forward_token(tokens.back(), (int)tokens.size() - 1, true);
+    const int n = (int)tokens.size();
+    int next = ingest_prompt_range(tokens.data(), 0, n);
+    if (next < 0 || next >= s.cfg.vocab) {
+        s.kv->free(s.seq_id);
+        return false;
     }
     cudaDeviceSynchronize();
     s.prefix_tokens = tokens;
@@ -1275,21 +1299,8 @@ double Qwen35Model::bench_ttft(const std::vector<int>& prompt) {
     s.bench_feedback_graph = false;
     cudaDeviceSynchronize();
     auto t0 = std::chrono::high_resolution_clock::now();
-    if (prefill_samples_lmhead()) {
-        for (size_t i = (size_t)start; i < prompt.size(); i++) {
-            (void)forward_token(prompt[i], (int)i, true);
-            cudaDeviceSynchronize();
-        }
-    } else {
-        for (size_t i = (size_t)start; i + 1 < prompt.size(); i++) {
-            forward_token(prompt[i], (int)i, false);
-            cudaDeviceSynchronize();
-        }
-        if (prompt.size() > (size_t)start) {
-            (void)forward_token(prompt.back(), (int)prompt.size() - 1, true);
-            cudaDeviceSynchronize();
-        }
-    }
+    (void)ingest_prompt_range(prompt.data(), start, (int)prompt.size());
+    cudaDeviceSynchronize();
     auto t1 = std::chrono::high_resolution_clock::now();
     if (!reuse) {
         s.kv->free(s.seq_id);
@@ -1340,17 +1351,14 @@ std::vector<int> Qwen35Model::generate(const std::vector<int>& prompt, int max_n
         fprintf(stderr, "[qwen35] KV allocate failed (pool too small for max_seq=%d)\n", s.cfg.max_seq);
         return out;
     }
-    int next = reuse ? s.prefix_next : -1;
     const int start = reuse ? s.prefix_len : 0;
     const size_t n = prompt.size();
-    if (prefill_samples_lmhead()) {
-        for (size_t i = (size_t)start; i < n; i++)
-            next = forward_token(prompt[i], (int)i, true);
-    } else {
-        for (size_t i = (size_t)start; i + 1 < n; i++)
-            forward_token(prompt[i], (int)i, false);
-        if (n > (size_t)start)
-            next = forward_token(prompt.back(), (int)n - 1, true);
+    int next = (start >= (int)n && reuse) ? s.prefix_next
+                                            : ingest_prompt_range(prompt.data(), start, (int)n);
+    if (next < 0 || next >= s.cfg.vocab) {
+        s.kv->free(s.seq_id);
+        fprintf(stderr, "[qwen35] prompt prefill failed (start=%d n=%zu)\n", start, n);
+        return out;
     }
     for (int i = 0; i < max_new; i++) {
         out.push_back(next);
@@ -1361,8 +1369,8 @@ std::vector<int> Qwen35Model::generate(const std::vector<int>& prompt, int max_n
 
     s.kv->free(s.seq_id);
     if (reuse) {
-        s.prefix_tokens.clear();
-        s.prefix_len = 0;
+        // KV is gone; keep prefix_tokens/len so the next cache_prefix()+generate() pair can
+        // re-warm the shared prefix and only prefill the suffix.
         s.prefix_next = -1;
         s.prefix_active = false;
         invalidate_decode_graph();

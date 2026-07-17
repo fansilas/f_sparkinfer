@@ -100,6 +100,9 @@ public:
     // Length of the currently cached prefix (0 if none).
     int prefix_cached_len() const;
 
+    // True when `prompt` begins with the installed prefix token sequence (requires active cache).
+    bool prompt_matches_prefix(const std::vector<int>& prompt) const;
+
     // Time-to-first-token: ingest `prompt` with prefill (no LM head on interior tokens when
     // not legacy), then one sampled forward. Reuses cache_prefix when the prompt starts with
     // the cached tokens (only the suffix is prefilled). Returns seconds.
@@ -133,7 +136,9 @@ public:
 
 private:
     void invalidate_decode_graph();
-    bool prompt_matches_prefix(const std::vector<int>& prompt) const;
+    // Prefill prompt tokens [start, end) with batched path when start==0, else token loop.
+    // Returns argmax seed at end-1 for decode, or -1 on failure.
+    int ingest_prompt_range(const int* ids, int start, int end);
 
     struct Impl;
     Impl* p_;
