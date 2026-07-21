@@ -12,6 +12,14 @@ LITERAL_BLOCK = 0.98   # still block tiny PRs if ≥98% literal
 # Per-function dilution catch (near-verbatim kernel embedded in larger PR).
 # WARN only — never escalates to block on its own (PR-level containment must be ≥85%).
 FUNC_BLOCK_WARN = 0.92
+# Ignore tiny device helpers / shared dequant that already live on main (PR #566 FP:
+# pfm_scale_min_k4 matched 100% across MoE PRs but is identical on main).
+FUNC_MIN_BODY_TOKENS = 80
+# Skip func-layer warn when PR-level overlap is negligible — real dilution still
+# clears this when a whole kernel is pasted into a larger diff.
+FUNC_MIN_PR_LEVEL = 0.15
+# Line-set overlap vs origin/main for the same file → treat as shared infrastructure.
+FUNC_MAIN_SKIP = 0.90
 
 # Structural (Levenshtein + bigram) layer disabled — too many FPs on independent
 # contributors converging on the same optimization pattern.
