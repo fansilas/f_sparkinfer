@@ -17,6 +17,7 @@
 #include "sparkinfer/kernels/quant.h"
 #include "sparkinfer/kernels/gemm.h"
 #include "sparkinfer/kernels/prefill_i8.h"
+#include "sparkinfer/kernels/prefill_fp8.h"
 #include "sparkinfer/kernels/prefill_moe.h"
 #include "sparkinfer/kernels/moe.h"
 
@@ -167,16 +168,25 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
     // unless SPARKINFER_PREFILL_I8_ATTN=0. GDN projections always stay bf16 above bf16_minctx.
     const char* _pi8attn = getenv("SPARKINFER_PREFILL_I8_ATTN");
     bool use_i8_attn = long_bf16 && (!_pi8attn || _pi8attn[0] != '0');
+    // GDN projections (wqkv/wqkv_gate/ssm_out) at long ctx: run them on the fp8 (e4m3) tensor cores
+    // instead of bf16. int8 is off here because the near-1-decay recurrence amplifies per-row int8
+    // activation-quant error (128k top1 ~0.31); e4m3's floating range holds it to bf16-like fidelity
+    // (~0.69) at the full int8 rate. The int8 activation scratch (A_i8/W_i8, 1 byte) doubles as the
+    // e4m3 buffer -- fp8 GDN and int8 FFN/attn never run at the same instant within a layer.
+    // SPARKINFER_PREFILL_FP8_GDN=0 restores the bf16 GDN projections (A/B).
+    const char* _pfp8 = getenv("SPARKINFER_PREFILL_FP8_GDN");
+    bool use_fp8_gdn = long_bf16 && (!_pfp8 || _pfp8[0] != '0');
     Arena a8;
     // A_i8 holds the quantized activation. Dense full-i8: non-FFN projs quantize N rows x K(<=H);
-    // chunked FFN quantizes at most FC rows x ffn. Long-ctx selective: N*H if attn-i8 else FC*ffn.
+    // chunked FFN quantizes at most FC rows x ffn. Long-ctx selective: N*H if attn-i8/fp8-gdn else FC*ffn.
     // MoE: no chunked FFN; projections quantize N rows x maxAK.
-    const bool need_i8 = use_i8 || use_i8_ffn || use_i8_attn || moe_shared_i8;
+    const bool wide_a = use_i8 || use_i8_attn || use_fp8_gdn;
+    const bool need_i8 = use_i8 || use_i8_ffn || use_i8_attn || use_fp8_gdn || moe_shared_i8;
     const size_t a_i8_sz = moe ? (size_t)N * maxAK
-                               : ((use_i8 || use_i8_attn)
+                               : (wide_a
                                   ? (((size_t)N * H > (size_t)FC * ffn) ? (size_t)N * H : (size_t)FC * ffn)
                                   : (size_t)FC * ffn);
-    const size_t sx_n = (use_i8 || use_i8_attn || moe_shared_i8) ? (size_t)N : (size_t)FC;
+    const size_t sx_n = (wide_a || moe_shared_i8) ? (size_t)N : (size_t)FC;
     signed char* A_i8 = need_i8 ? a8.alloc<signed char>(a_i8_sz) : nullptr;
     signed char* W_i8 = need_i8 ? a8.alloc<signed char>(maxw) : nullptr;
     float* sx = need_i8 ? a8.alloc<float>(sx_n) : nullptr;
@@ -187,6 +197,7 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
         use_i8_ffn = false;
         use_i8_attn = false;
         moe_shared_i8 = false;
+        use_fp8_gdn = false;
         A_i8 = W_i8 = nullptr;
         sx = sw = nullptr;
     }
@@ -321,6 +332,13 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                 kernels::launch_prefill_quantize_rows_i8(wb, W_i8, sw, n_out, K, st);
             }
             kernels::launch_prefill_gemm_i8(A_i8, W_i8, sx, sw, C, R, n_out, K, st);
+        } else if (use_fp8_gdn && n_out >= 128) {
+            // fp8 (e4m3) tensor-core path for the long-ctx GDN projections. A_i8/W_i8 (1 byte) hold
+            // the e4m3 operands; dequant the weight to bf16 scratch, then row/channel fp8-quantize.
+            kernels::launch_prefill_quantize_rows_fp8(A, A_i8, sx, R, K, st);
+            const void* wb = dq(W, wtype, n_out, K);
+            kernels::launch_prefill_quantize_rows_fp8(wb, W_i8, sw, n_out, K, st);
+            kernels::launch_prefill_gemm_fp8(A_i8, W_i8, sx, sw, C, R, n_out, K, st);
         } else {
             // mma.sync bf16 GEMM only for dense-hybrid long prefill (the >96k int8→bf16 fallback).
             // MoE always stays on wmma: its top-k router turns tiny GEMM differences into expert
@@ -329,6 +347,28 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
             // VRAM, so R<=FC would otherwise keep the dominant gate/up/down GEMMs on wmma forever.
             const bool prefer_mma = !moe && N > bf16_minctx;
             kernels::launch_prefill_gemm(A, dq(W, wtype, n_out, K), C, R, n_out, K, st, prefer_mma);
+        }
+    };
+
+    // GDN wqkv + wqkv_gate both project the same input xn, so on the fp8 path quantize xn to e4m3
+    // ONCE and share it across both GEMMs (proj() would otherwise re-quantize xn per projection --
+    // a full redundant read of xn and rewrite of the e4m3 activation each layer). Bit-identical to
+    // the two independent proj() calls. Default on with the fp8 GDN path;
+    // SPARKINFER_PREFILL_FP8_GDN_SHAREQ=0 restores the per-projection quantize (A/B).
+    const char* _pshareq = getenv("SPARKINFER_PREFILL_FP8_GDN_SHAREQ");
+    const bool fp8_shareq = use_fp8_gdn && (!_pshareq || _pshareq[0] != '0');
+    auto gdn_qkv_z = [&](const bf16* A, const Qwen35LayerWeights& w) {
+        if (fp8_shareq) {
+            kernels::launch_prefill_quantize_rows_fp8(A, A_i8, sx, N, H, st);   // xn -> e4m3 once
+            const void* wb = dq(w.wqkv, w.wqkv_type, lqkv, H);
+            kernels::launch_prefill_quantize_rows_fp8(wb, W_i8, sw, lqkv, H, st);
+            kernels::launch_prefill_gemm_fp8(A_i8, W_i8, sx, sw, b8, N, lqkv, H, st);
+            wb = dq(w.wqkv_gate, w.wqkv_gate_type, lvdim, H);
+            kernels::launch_prefill_quantize_rows_fp8(wb, W_i8, sw, lvdim, H, st);
+            kernels::launch_prefill_gemm_fp8(A_i8, W_i8, sx, sw, lz, N, lvdim, H, st);
+        } else {
+            proj(A, w.wqkv,      w.wqkv_type,      b8, lqkv,  H);   // qkv
+            proj(A, w.wqkv_gate, w.wqkv_gate_type, lz, lvdim, H);   // z gate
         }
     };
 
@@ -349,8 +389,7 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
         const Qwen35LayerWeights& w = s.w.layers[L];
         if (w.linear_attn) {
             // ---- Gated DeltaNet linear-attention layer ----
-            proj(xn, w.wqkv,      w.wqkv_type,      b8, lqkv,  H);   // qkv
-            proj(xn, w.wqkv_gate, w.wqkv_gate_type, lz, lvdim, H);   // z gate
+            gdn_qkv_z(xn, w);                                       // qkv + z gate (fp8: fused)
             proj(xn, w.ssm_alpha, w.ssm_alpha_type, la, vh,    H);
             proj(xn, w.ssm_beta,  w.ssm_beta_type,  lb, vh,    H);
             bf16* conv_state = lin_conv_state + (size_t)L * (c.linear_conv_kernel - 1) * lqkv;
@@ -413,8 +452,8 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
                     kernels::launch_prefill_quantize_rows_i8(hn_c, A_i8, sx, fn, H, st);
                     kernels::launch_prefill_gemm_i8(A_i8, ffn_Wg_i8, sx, ffn_swg, ffg, fn, ffn, H, st);
                     kernels::launch_prefill_gemm_i8(A_i8, ffn_Wu_i8, sx, ffn_swu, ffu, fn, ffn, H, st);
-                    kernels::launch_prefill_swiglu(ffg, ffu, ffg, (long)fn * ffn, st);
-                    kernels::launch_prefill_quantize_rows_i8(ffg, A_i8, sx, fn, ffn, st);
+                    // fused SwiGLU + int8 quantize for the down input (skips the ffg DRAM round-trip)
+                    kernels::launch_prefill_swiglu_quant_i8(ffg, ffu, A_i8, sx, fn, ffn, st);
                     kernels::launch_prefill_gemm_i8(A_i8, ffn_Wd_i8, sx, ffn_swd,
                                                     ao + (size_t)fo * H, fn, H, ffn, st);
                 } else {
