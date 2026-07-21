@@ -20,6 +20,7 @@ from pathlib import Path
 from copycat_policy import (
     COPYCAT_BLOCK, COPYCAT_WARN, COPYCAT_CONTAINMENT, MAX_WARNINGS,
     MIN_ADDED_LINES, LITERAL_BLOCK, FUNC_BLOCK_WARN,
+    FUNC_MIN_BODY_TOKENS, FUNC_MIN_PR_LEVEL, FUNC_MAIN_SKIP,
     STRUCTURAL_ENABLED, LLM_ENABLED, skip_copycat_scoring,
     COPYCAT_REFERENCE_STATE,
 )
@@ -70,14 +71,63 @@ _BOILERPLATE_RE = re.compile(
 
 
 def is_boilerplate_block(sig, body):
-    """Skip per-function scoring on shared launch/dispatch boilerplate."""
+    """Skip per-function scoring on shared launch/dispatch / tiny device helpers."""
     text = f"{sig} {body}".strip()
     if _BOILERPLATE_RE.search(text) and len(body.splitlines()) <= 3:
         return True
     s = sig.strip()
     if s.startswith(("if ", "if(", "} else", "else if")):
         return True
+    nlines = sum(1 for l in body.splitlines() if l.strip())
+    # Tiny __device__ helpers (dequant/scale) converge across MoE PRs and often
+    # already exist on main — not evidence of copying another open PR.
+    if "__device__" in s and nlines <= 20:
+        return True
+    if nlines <= 8:
+        return True
+    tokens = [t for l in body.splitlines() for t in l.split() if len(t) > 1]
+    if len(tokens) < FUNC_MIN_BODY_TOKENS:
+        return True
     return False
+
+
+def _main_file_text(repo, path, cache):
+    """Raw file contents at origin/main (cached). Empty if missing."""
+    if not path or path in cache:
+        return cache.get(path, "")
+    r = gh(["api", f"repos/{repo}/contents/{path}?ref=main",
+            "-H", "Accept: application/vnd.github.raw"])
+    text = r.stdout or "" if r.returncode == 0 else ""
+    cache[path] = text
+    return text
+
+
+def block_already_on_main(repo, path, body, cache=None):
+    """True when ≥FUNC_MAIN_SKIP of the block's non-empty lines already exist on main."""
+    if cache is None:
+        cache = {}
+    main = _main_file_text(repo, path, cache)
+    if not main:
+        return False
+    lines = [l.strip() for l in body.splitlines() if l.strip()]
+    if not lines:
+        return False
+    main_lines = {l.strip() for l in main.splitlines() if l.strip()}
+    hit = sum(1 for l in lines if l in main_lines)
+    return (hit / len(lines)) >= FUNC_MAIN_SKIP
+
+
+def func_layer_should_warn(pr_level_c, func_c, copy_sig, copy_body, path="", repo="", cache=None):
+    """Gate L4 warns — skip tiny/main-shared helpers and negligible PR-level overlap."""
+    if func_c < FUNC_BLOCK_WARN:
+        return False
+    if pr_level_c < FUNC_MIN_PR_LEVEL:
+        return False
+    if is_boilerplate_block(copy_sig, copy_body):
+        return False
+    if repo and path and block_already_on_main(repo, path, copy_body, cache):
+        return False
+    return True
 
 
 def pr_has_label(repo, num, label):
@@ -166,12 +216,19 @@ def structural_similarity(repo, copy_num, orig_num, containment_pct):
 
 def split_into_blocks(repo, num):
     """Split a PR's added lines into logical CUDA code blocks (kernel functions, device
-    functions, and other named scopes). Filters out trivial if/else conditionals that
-    happen to match across PRs but aren't actual functions (minimum 10 tokens)."""
+    functions, and other named scopes). Returns list of (sig, body, path). Filters out
+    trivial if/else conditionals that happen to match across PRs but aren't actual
+    functions (minimum 10 tokens)."""
     diff = gh(["pr", "diff", str(num), "-R", repo]).stdout or ""
     blocks = []
-    current_sig = None; current_body = []
+    current_sig = None; current_body = []; current_file = ""
     for line in diff.splitlines():
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            if p.startswith("b/"):
+                p = p[2:]
+            current_file = "" if (not p or p == "/dev/null") else p
+            continue
         if not line.startswith("+") or line.startswith("+++"):
             continue
         s = line[1:].strip()
@@ -190,7 +247,7 @@ def split_into_blocks(repo, num):
             if current_sig and current_body:
                 tokens = [t for l in current_body for t in l.split() if len(t)>1]
                 if len(tokens) >= 10:
-                    blocks.append((current_sig, "\n".join(current_body)))
+                    blocks.append((current_sig, "\n".join(current_body), current_file))
             current_sig = s
             current_body = []
         elif current_sig is not None:
@@ -198,26 +255,29 @@ def split_into_blocks(repo, num):
     if current_sig and current_body:
         tokens = [t for l in current_body for t in l.split() if len(t)>1]
         if len(tokens) >= 10:
-            blocks.append((current_sig, "\n".join(current_body)))
+            blocks.append((current_sig, "\n".join(current_body), current_file))
     return blocks
 
 
-def per_function_containment(repo, copy_num, orig_num):
-    """Return the HIGHEST per-function containment across all shared blocks. If the original
-    PR has one function (focused change) and the copy PR adds it inside a larger PR, this
-    will catch it even when PR-level containment is low."""
+def per_function_containment(repo, copy_num, orig_num, main_cache=None):
+    """Return (best_c, copy_sig, orig_sig, copy_body, path) for the strongest non-boilerplate
+    shared block. Skips tiny device helpers and blocks already present on main."""
+    if main_cache is None:
+        main_cache = {}
     copy_blocks = split_into_blocks(repo, copy_num)
     orig_blocks = split_into_blocks(repo, orig_num)
     if not copy_blocks or not orig_blocks:
-        return 0.0, "", ""
-    best = 0.0; best_copy_sig = ""; best_orig_sig = ""
-    for csig, cb in copy_blocks:
+        return 0.0, "", "", "", ""
+    best = 0.0; best_copy_sig = ""; best_orig_sig = ""; best_body = ""; best_path = ""
+    for csig, cb, cpath in copy_blocks:
         if is_boilerplate_block(csig, cb):
+            continue
+        if block_already_on_main(repo, cpath, cb, main_cache):
             continue
         ctokens = set(cb.split())
         if len(ctokens) < 5:
             continue
-        for osig, ob in orig_blocks:
+        for osig, ob, _opath in orig_blocks:
             otokens = set(ob.split())
             if len(otokens) < 5:
                 continue
@@ -226,7 +286,8 @@ def per_function_containment(repo, copy_num, orig_num):
             c = len(ctokens & otokens) / len(ctokens)
             if c > best:
                 best = c; best_copy_sig = csig; best_orig_sig = osig
-    return best, best_copy_sig, best_orig_sig
+                best_body = cb; best_path = cpath
+    return best, best_copy_sig, best_orig_sig, best_body, best_path
 
 
 def _llm_provider():
@@ -420,10 +481,10 @@ def warn_copycat(repo, num, original, author, strike_count, containment_pct, str
                 f"is substantially contained in #{original} by a different author — the PR-level "
                 f"containment is low because the copied function is embedded inside a larger diff.")
     elif structural:
-        head = (f"**{containment_pct:.0f}% containment** + structural similarity "
+        head = (f"**{containment_pct:.0%} containment** + structural similarity "
                 "(Levenshtein + bigram cosine both above threshold vs this PR's code shape)")
     else:
-        head = f"**{containment_pct:.0f}% containment** in the earlier #{original}"
+        head = f"**{containment_pct:.0%} containment** in the earlier #{original}"
     if will_block:
         tail = (f"\n\nThis is the **{MAX_WARNINGS}rd** copycat-like submission — the account is now "
                 "**blocked** and the PR closed.")
@@ -495,6 +556,7 @@ def main():
     original = None; orig_author = None; best_containment = 0.0
     pr_level_containment = 0.0
     best_lev = 0.0; best_cos = 0.0; structural_fired = False
+    main_cache = {}
 
     for e_num in earlier_nums:
         e_author = pr_author.get(e_num, "")
@@ -520,16 +582,17 @@ def main():
 
         # Layer 4: per-function containment (near-verbatim kernel inside larger PR).
         if c < COPYCAT_WARN and not structural_fired:
-            func_c, func_csig, func_osig = per_function_containment(REPO, pr_num, e_num)
-            if func_c >= FUNC_BLOCK_WARN:
+            func_c, func_csig, func_osig, func_body, func_path = per_function_containment(
+                REPO, pr_num, e_num, main_cache)
+            if func_layer_should_warn(c, func_c, func_csig, func_body, func_path, REPO, main_cache):
                 structural_fired = True; best_lev = func_c; best_cos = -1.0
                 best_containment = max(best_containment, COPYCAT_WARN)
                 original = e_num; orig_author = e_author
                 print(f"  per-function bump: {func_csig[:60]}... is {func_c:.0%} contained in #{e_num} -> WARN")
-            elif _llm_enabled() and func_c >= LLM_FUNC_MIN:
+            elif _llm_enabled() and func_c >= LLM_FUNC_MIN and not is_boilerplate_block(func_csig, func_body):
                 print(f"  layer 4 LLM: per-function containment={func_c:.1%} (vs #{e_num})")
-                cb = next((b for s, b in split_into_blocks(REPO, pr_num) if s == func_csig), "")
-                ob = next((b for s, b in split_into_blocks(REPO, e_num) if s == func_osig), "")
+                cb = func_body
+                ob = next((b for s, b, _p in split_into_blocks(REPO, e_num) if s == func_osig), "")
                 is_copy, llm_conf, reason = llm_judge_copycat(cb, ob, func_csig, func_osig)
                 print(f"  LLM: copycat={is_copy} confidence={llm_conf:.2f} reason={reason[:120]}")
                 if is_copy and llm_conf >= LLM_CONFIDENCE_MIN:

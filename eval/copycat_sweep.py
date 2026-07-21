@@ -65,13 +65,14 @@ def sweep(apply=False):
                 detection = f"L2: {COPYCAT_WARN:.0%}–{COPYCAT_BLOCK:.0%} containment"
 
             if not detection:
-                func_c, func_csig, func_osig = per_function_containment(REPO, pr_num, e_num)
-                if func_c >= FUNC_BLOCK_WARN:
+                func_c, func_csig, func_osig, func_body, func_path = per_function_containment(
+                    REPO, pr_num, e_num)
+                if func_layer_should_warn(c, func_c, func_csig, func_body, func_path, REPO):
                     detection = f"L4: per-function {func_c:.0%} (PR-level {c:.0%})"
                     details = {"func_c": round(func_c, 3), "func_sig": func_csig[:80]}
-                elif _llm_enabled() and func_c >= LLM_FUNC_MIN:
-                    cb = next((b for s, b in split_into_blocks(REPO, pr_num) if s == func_csig), "")
-                    ob = next((b for s, b in split_into_blocks(REPO, e_num) if s == func_osig), "")
+                elif _llm_enabled() and func_c >= LLM_FUNC_MIN and not is_boilerplate_block(func_csig, func_body):
+                    cb = func_body
+                    ob = next((b for s, b, _p in split_into_blocks(REPO, e_num) if s == func_osig), "")
                     is_copy, llm_c, reason = llm_judge_copycat(cb, ob, func_csig, func_osig)
                     if is_copy and llm_c >= LLM_CONFIDENCE_MIN:
                         detection = f"L4-LLM: confidence={llm_c:.0%}, func_c={func_c:.0%}"

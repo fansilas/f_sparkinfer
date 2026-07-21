@@ -29,7 +29,9 @@ Shared thresholds live in `eval/copycat_policy.py`.
   `copycats.json` with `"blocked": false, "penalty_days": 0` and are **skipped** by both guards.
 - **Tiny PRs** (&lt; 15 added lines) are skipped unless **≥ 98%** literal overlap.
 - **Per-function check**: a single CUDA function ≥ **92%** contained in an earlier PR → **warn only**
-  (never block on per-function alone). CUDA launch / template-instantiation boilerplate is excluded.
+  (never block on per-function alone). Skips: CUDA launch boilerplate, tiny `__device__` helpers
+  (≤20 lines / &lt;80 tokens), and blocks whose lines already exist on `origin/main` for that file
+  (PR #566-style false positives on shared dequant helpers). Requires PR-level overlap ≥ **15%**.
   **Block requires PR-level containment ≥ 85%.**
 - **Structural similarity** and **LLM auto-warn** are **disabled** by default (too many false positives when independent contributors land similar optimizations).
 
