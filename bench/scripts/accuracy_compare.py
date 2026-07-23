@@ -20,7 +20,7 @@ int8-MMA and sparse-KV engagement thresholds — which is the whole point of the
 --metric-label NAME renames the machine-readable METRIC line (e.g. METRIC_LONG), so accuracy.sh
 can emit several passes and still hand evaluate.sh exactly one unambiguous `METRIC ` line.
 """
-import sys, json, math, urllib.request
+import sys, json, math, time, urllib.error, urllib.request
 from tokenizers import Tokenizer
 
 argv = sys.argv[1:]
@@ -48,12 +48,41 @@ if _toks and all(t.lstrip("-").isdigit() for t in _toks):
 else:
     ids = Tokenizer.from_file(tok_path).encode(_raw).ids
 
-def llama_dist(prefix):
-    req = {"prompt": prefix, "n_predict": 1, "n_probs": TOPK, "temperature": 0, "cache_prompt": True}
+def _completion(req):
     r = urllib.request.urlopen(urllib.request.Request(
         URL + "/completion", data=json.dumps(req).encode(),
         headers={"Content-Type": "application/json"}), timeout=120)
-    tl = json.load(r)["completion_probabilities"][0]["top_logprobs"]
+    return json.load(r)
+
+def llama_dist(prefix):
+    # temperature=0 + n_probs: top_logprobs come from pre-sampling logits
+    # (post_sampling_probs=false). When the greedy token is incomplete UTF-8,
+    # llama-server (n_predict=1) skips add_token and omits completion_probabilities
+    # entirely — KeyError / infra error. Retry forcing an ASCII sample so the
+    # response includes probs; the distribution itself is unchanged.
+    # Also retry on transient HTTP 5xx (same grammar force, then one plain retry).
+    req = {"prompt": prefix, "n_predict": 1, "n_probs": TOPK, "temperature": 0, "cache_prompt": True}
+    data = None
+    last_err = None
+    for attempt, extra in enumerate(({}, {"grammar": 'root ::= "a"'}, {})):
+        try:
+            data = _completion({**req, **extra})
+            if data.get("completion_probabilities"):
+                break
+            last_err = f"omitted completion_probabilities (content={data.get('content')!r})"
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code}: {e.reason}"
+            if e.code < 500 or attempt == 2:
+                raise
+            time.sleep(0.5)
+        except (TimeoutError, urllib.error.URLError) as e:
+            last_err = str(e)
+            if attempt == 2:
+                raise
+            time.sleep(0.5)
+    if not data or not data.get("completion_probabilities"):
+        raise RuntimeError(f"llama-server /completion failed after retries: {last_err}")
+    tl = data["completion_probabilities"][0]["top_logprobs"]
     return {e["id"]: e["logprob"] for e in tl}
 
 spark = {}

@@ -42,11 +42,19 @@ CUDA_HOST_FLAG=""
 
 ensure_sparkinfer() {  # $1 = arch
   [ -x "$ROOT/build/runtime/qwen3_gguf_bench" ] && [ -x "$ROOT/build/runtime/qwen3_gguf_score" ] \
-    && [ -x "$ROOT/build/runtime/qwen3_gguf_prefill_check" ] && return
+    && [ -x "$ROOT/build/runtime/qwen3_gguf_prefill_check" ] && return 0
   echo ">> building sparkinfer (sm_$1) ..." >&2
   cmake -S "$ROOT" -B "$ROOT/build" -DCMAKE_CUDA_ARCHITECTURES="$1" -DCMAKE_BUILD_TYPE=Release $CUDA_HOST_FLAG >/dev/null
   # Cap at 2 parallel jobs — cc1plus for sm_120 uses ~2-3 GB RAM each; -j4 OOMs on 64GB eval boxes.
-  cmake --build "$ROOT/build" -j2 >/dev/null
+  if ! cmake --build "$ROOT/build" -j2 >/dev/null; then
+    echo ">> sparkinfer build FAILED (sm_$1)" >&2
+    return 1
+  fi
+  [ -x "$ROOT/build/runtime/qwen3_gguf_bench" ] && [ -x "$ROOT/build/runtime/qwen3_gguf_score" ] \
+    && [ -x "$ROOT/build/runtime/qwen3_gguf_prefill_check" ] || {
+    echo ">> sparkinfer build incomplete — missing runtime binaries (sm_$1)" >&2
+    return 1
+  }
 }
 
 # H3: batched-vs-token prefill fidelity binary (not always in release tarballs).

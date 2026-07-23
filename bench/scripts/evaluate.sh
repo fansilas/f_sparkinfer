@@ -829,7 +829,8 @@ if cb_ttft > 0 and cb_frontier > 0:
 print("RESULT_JSON " + json.dumps(pf))
 PY
 )"
-DECODE_LINE="$DECODE_LINE" PREFILL_LINE="$PREFILL_LINE" python3 - <<'PY'
+DECODE_LINE="$DECODE_LINE" PREFILL_LINE="$PREFILL_LINE" \
+EVAL_MODE="$EVAL_MODE" GUARD_TOL="$GUARD_TOL" python3 - <<'PY'
 import json, os
 
 TIER_RANK = {"XL": 6, "L": 5, "M": 4, "S": 3, "XS": 2, "none": 1, "BASELINE": 0, "REJECT": -1}
@@ -903,5 +904,31 @@ if prefill_raw.startswith("RESULT_JSON "):
         res["score_metric"] = "prefill"
     else:
         res["score_metric"] = "decode"
+
+# CB mixed-load TTFT no-regression gate (latency: lower is better).
+# Single-seq pp gains must not excuse a serving-path TTFT regression (same 2% tol as decode/pp).
+tol = float(os.environ.get("GUARD_TOL", "0.98") or 0.98)
+cb_ttft = float(res.get("cb_ttft_s") or 0)
+cb_base = float(res.get("cb_frontier_ttft_s") or 0)
+cb_pass = True
+if cb_ttft > 0 and cb_base > 0:
+    cb_pass = cb_ttft <= (cb_base / tol)
+res["guard_cb_ttft_pass"] = cb_pass
+res["guard_cb_ttft_baseline"] = round(cb_base, 6) if cb_base > 0 else 0.0
+res["guard_cb_ttft_tol"] = tol
+if (not cb_pass) and os.environ.get("EVAL_MODE", "longctx") != "short":
+    labels = list(res.get("regression_labels") or [])
+    if "regression-cb-ttft" not in labels:
+        labels.append("regression-cb-ttft")
+    res["regression_labels"] = labels
+    limit = cb_base / tol
+    reason = (f"CB mixed-load TTFT no-regression gate: {cb_ttft:.3f}s > "
+              f"{100 * tol:.0f}% of main {cb_base:.3f}s (limit {limit:.3f}s)")
+    # Keep speed annotations for the comment; overall stays merge-blocking REJECT.
+    res["pass"] = False
+    res["label"] = "REJECT"
+    res["reason"] = reason
+    res["auto_close"] = True
+
 print("RESULT_JSON " + json.dumps(res))
 PY
