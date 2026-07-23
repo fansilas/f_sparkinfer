@@ -34,7 +34,9 @@ IMAGE   = os.environ.get("EVAL_IMAGE", "nvidia/cuda:12.8.0-devel-ubuntu24.04")  
 TEMPLATE_HASH = os.environ.get("EVAL_TEMPLATE_HASH", "7f806603ccd0de9b7370266673c0a32d")
 SSH_KEY = os.path.expanduser(os.environ.get("SSH_KEY", "~/.ssh/id_ed25519"))
 # Bare-metal SSH boxes often have nvcc outside default PATH (non-interactive ssh).
-BOX_CUDA_ENV = "export PATH=/usr/local/cuda-12.8/bin:/usr/local/cuda/bin:$PATH; "
+# Prefer newest CUDA first (13.0 on current vast base images; 12.8 still common).
+BOX_CUDA_ENV = ("export PATH=/usr/local/cuda-13.0/bin:/usr/local/cuda-12.8/bin:"
+                "/usr/local/cuda/bin:$PATH; ")
 LLAMACPP_DIR = os.environ.get("LLAMACPP_DIR", "/workspace/.llamacpp")            # persists across stop/start
 INSTANCE_FILE = os.path.expanduser(os.environ.get("VAST_INSTANCE_FILE", "~/.sparkinfer_vast_instance"))  # self-healed id
 # IPs of hosts that repeatedly hang on image pull or never expose direct SSH, despite high vast

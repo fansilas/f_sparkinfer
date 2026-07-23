@@ -604,7 +604,10 @@ final["pass_qwen36"] = bool(score36.get("pass"))
 final["model"] = "bidir"
 final["primary_quant"] = quant
 final["regression_labels"] = list(dict.fromkeys(
-    (score35.get("guard_regression_labels") or []) + (score36.get("guard_regression_labels") or [])))
+    (score35.get("guard_regression_labels") or [])
+    + (score36.get("guard_regression_labels") or [])
+    + (score35.get("regression_labels") or [])
+    + (score36.get("regression_labels") or [])))
 
 print("RESULT_JSON " + json.dumps(final))
 PY

@@ -1130,9 +1130,25 @@ def render(res, oid):
                             f"{f' · {plbl}' if plbl else ''}) | {block.get('prefill_tps', '?')} pp tok/s"
                             f"{ttft_note}{src_note} · "
                             f"`eval-prefill:{block.get('prefill_label')}` |")
-                if block.get("cb_ttft_s") is not None and src != "cb":
+                if block.get("cb_ttft_s") is not None and block.get("cb_frontier_ttft_s") is not None:
                     cb_pct = block.get("cb_pct_over_frontier")
-                    cb_note = f" · TTFT −{cb_pct}%" if cb_pct is not None else ""
+                    if cb_pct is None:
+                        cb_note = ""
+                    elif cb_pct >= 0:
+                        cb_note = f" · TTFT −{cb_pct}%"
+                    else:
+                        cb_note = f" · TTFT +{abs(cb_pct)}% (regress)"
+                    gate = "pass" if block.get("guard_cb_ttft_pass", True) else "fail"
+                    rows.append(f"| {title} CB mixed TTFT no-regression gate | {block.get('cb_ttft_s')}s"
+                                f" vs main {block.get('cb_frontier_ttft_s')}s{cb_note} · {gate} |")
+                elif block.get("cb_ttft_s") is not None and src != "cb":
+                    cb_pct = block.get("cb_pct_over_frontier")
+                    if cb_pct is None:
+                        cb_note = ""
+                    elif cb_pct >= 0:
+                        cb_note = f" · TTFT −{cb_pct}%"
+                    else:
+                        cb_note = f" · TTFT +{abs(cb_pct)}% (regress)"
                     rows.append(f"| {title} CB mixed TTFT | {block.get('cb_ttft_s')}s"
                                 f" vs main {block.get('cb_frontier_ttft_s', '?')}s{cb_note} |")
             elif block.get("eval_prefill"):
