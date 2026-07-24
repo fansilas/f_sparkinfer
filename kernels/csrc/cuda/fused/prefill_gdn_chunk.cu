@@ -352,7 +352,13 @@ __global__ void pf_gdnc_scan_kernel(const __nv_bfloat16* __restrict__ q,
         __syncthreads();
 
         // ---- U~[p] = exp(G_last - G_p) U^[p]  (tail rows already carry U^ = 0) ----
-        const float g_last = s_g[C - 1];               // == s_g[len-1]: tail log-gates are 0
+        // G_last is the chunk's final cumulative log-gate, at the last REAL token (index len-1).
+        // The prep kernel leaves the tail cumulative flat (so there s_g[C-1]==s_g[len-1]), but the
+        // load above stages THIS kernel's s_g tail as 0, so on a short final chunk (len < C) s_g[C-1]
+        // is 0, not G_last — which would set the state-carry decay exp(G_last) to 1 (no forgetting)
+        // and blow up U~ = exp(-G_p)U^ (overflow for the strongly-decaying gates here). Read len-1;
+        // for full chunks len==C so this is identical.
+        const float g_last = s_g[len - 1];
         for (int e = tid; e < C * JC; e += nthr) {
             const int i = e / JC;
             s_U[e] *= __expf(g_last - s_g[i]);
