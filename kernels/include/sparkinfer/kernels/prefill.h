@@ -25,6 +25,12 @@ void launch_prefill_gemm(const void* A, const void* W, void* C,
                          int M, int N, int K, cudaStream_t stream = nullptr,
                          bool prefer_mma = false);
 
+// bf16 tensor-core GEMM with fp32 output: C[M,N] = A[M,K] @ W[N,K]^T, fp32 accumulate + fp32
+// store. For logit projections (MoE router) whose output feeds a discrete top-k and must not
+// round through bf16. A,W bf16; C fp32.
+void launch_prefill_gemm_f32(const void* A, const void* W, void* C,
+                             int M, int N, int K, cudaStream_t stream = nullptr);
+
 // SwiGLU elementwise for the dense FFN: h[i] = silu(gate[i]) * up[i] over n elements.
 void launch_prefill_swiglu(const void* gate, const void* up, void* h, long n,
                            cudaStream_t stream = nullptr);

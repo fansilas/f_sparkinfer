@@ -255,6 +255,105 @@ __global__ __launch_bounds__(256, 2) void pf_gemm_bf16_mma_kernel(
     }
 }
 
+// fp32-output twin of pf_gemm_bf16_mma_kernel. Same C[M,N] = A[M,K] @ W[N,K]^T and identical
+// bf16-in/fp32-accumulate math, but writes fp32 straight to global -- used for the MoE router
+// logits, which feed a discrete top-k and must NOT round through bf16 (bf16 accumulate is already
+// avoided; the store stays fp32 so selection sees full precision). Replaces the per-(token,expert)
+// warp-dot pfm_router_logits_kernel, which re-read the whole [E,H] router weight once per token
+// (nsys: 13.8% of qwen36 prefill @32k). fp32 accumulate keeps it bit-faithful to the scalar path.
+__global__ __launch_bounds__(256, 2) void pf_gemm_bf16_mma_f32_kernel(
+        const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ W,
+        float* __restrict__ C, int M, int N, int K) {
+    constexpr int MFRAG = 2;
+    constexpr int NFRAG = 8;
+    __shared__ __nv_bfloat16 As[2][PF_BM][PF_BK];
+    __shared__ __nv_bfloat16 Bs[2][PF_BN][PF_BK];
+
+    const int tid  = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int grp  = lane >> 2;
+    const int tig  = lane & 3;
+    const int wm   = warp & 3;
+    const int wn   = warp >> 2;
+    const int m0   = blockIdx.y * PF_BM;
+    const int n0   = blockIdx.x * PF_BN;
+    const int nk   = (K + PF_BK - 1) / PF_BK;
+
+    float acc[MFRAG][NFRAG][4];
+    #pragma unroll
+    for (int i = 0; i < MFRAG; i++)
+        #pragma unroll
+        for (int j = 0; j < NFRAG; j++)
+            #pragma unroll
+            for (int e = 0; e < 4; e++) acc[i][j][e] = 0.f;
+
+    auto stage = [&](int buf, int k0) {
+        #pragma unroll
+        for (int s = tid; s < 512; s += 256) {
+            const int r = s >> 2, c = s & 3, e = c << 3;
+            const int gm = m0 + r, gn = n0 + r, gk = k0 + e;
+            pf_cp16(&As[buf][r][pf_swz_e(e, r)], &A[(size_t)gm * K + gk], gm < M && gk < K);
+            pf_cp16(&Bs[buf][r][pf_swz_e(e, r)], &W[(size_t)gn * K + gk], gn < N && gk < K);
+        }
+        __pipeline_commit();
+    };
+
+    stage(0, 0);
+    int buf = 0;
+    for (int t = 0; t < nk; t++) {
+        if (t + 1 < nk) stage(buf ^ 1, (t + 1) * PF_BK);
+        __pipeline_wait_prior(t + 1 < nk ? 1 : 0);
+        __syncthreads();
+
+        #pragma unroll
+        for (int kk = 0; kk < PF_BK; kk += 16) {
+            const int kb = kk + tig * 2;
+            unsigned af[MFRAG][4], bf[NFRAG][2];
+            #pragma unroll
+            for (int i = 0; i < MFRAG; i++) {
+                const int rlo = wm * 32 + i * 16 + grp, rhi = rlo + 8;
+                af[i][0] = pf_lds32b(&As[buf][rlo][pf_swz_e(kb,     rlo)]);
+                af[i][1] = pf_lds32b(&As[buf][rhi][pf_swz_e(kb,     rhi)]);
+                af[i][2] = pf_lds32b(&As[buf][rlo][pf_swz_e(kb + 8, rlo)]);
+                af[i][3] = pf_lds32b(&As[buf][rhi][pf_swz_e(kb + 8, rhi)]);
+            }
+            #pragma unroll
+            for (int j = 0; j < NFRAG; j++) {
+                const int col = wn * 64 + j * 8 + grp;
+                bf[j][0] = pf_lds32b(&Bs[buf][col][pf_swz_e(kb,     col)]);
+                bf[j][1] = pf_lds32b(&Bs[buf][col][pf_swz_e(kb + 8, col)]);
+            }
+            #pragma unroll
+            for (int i = 0; i < MFRAG; i++)
+                #pragma unroll
+                for (int j = 0; j < NFRAG; j++)
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                        : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+                        : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]),
+                          "r"(bf[j][0]), "r"(bf[j][1]));
+        }
+        __syncthreads();
+        buf ^= 1;
+    }
+
+    // fp32 store: each accumulator element -> one float in global.
+    #pragma unroll
+    for (int i = 0; i < MFRAG; i++)
+        #pragma unroll
+        for (int j = 0; j < NFRAG; j++) {
+            const int gn = n0 + wn * 64 + j * 8 + tig * 2;
+            #pragma unroll
+            for (int e = 0; e < 4; e++) {
+                const int gm = m0 + wm * 32 + i * 16 + grp + (e >> 1) * 8;
+                const int cn = gn + (e & 1);
+                if (gm < M && cn < N) C[(size_t)gm * N + cn] = acc[i][j][e];
+            }
+        }
+}
+
 // ============================================================================
 // Elementwise helpers
 // ============================================================================
@@ -796,6 +895,14 @@ void launch_prefill_gemm(const void* A, const void* W, void* C,
         pf_gemm_bf16_mma_kernel<<<grid, 256, 0, stream>>>(
             reinterpret_cast<const __nv_bfloat16*>(A), reinterpret_cast<const __nv_bfloat16*>(W),
             reinterpret_cast<__nv_bfloat16*>(C), M, N, K);
+}
+
+void launch_prefill_gemm_f32(const void* A, const void* W, void* C,
+                             int M, int N, int K, cudaStream_t stream) {
+    dim3 grid((N + PF_BN - 1) / PF_BN, (M + PF_BM - 1) / PF_BM);
+    pf_gemm_bf16_mma_f32_kernel<<<grid, 256, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(A), reinterpret_cast<const __nv_bfloat16*>(W),
+        reinterpret_cast<float*>(C), M, N, K);
 }
 
 void launch_prefill_swiglu(const void* gate, const void* up, void* h, long n, cudaStream_t stream) {

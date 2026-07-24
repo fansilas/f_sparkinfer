@@ -616,7 +616,13 @@ int prefill_batched_run(const Qwen35PrefillCtx& s, const int* prompt_ids, int n)
             // MoE weight re-read that pinned the token loop). Router logits use the decode-reference
             // gemv_f32-order dot; the router weight may itself be quantized in the UD GGUF. ----
             const void* rw = w.router_w_type ? dq(w.router_w, w.router_w_type, E, H) : w.router_w;
-            kernels::launch_pfm_router_logits(hn, rw, mlogits, N, E, H, st);
+            // Router logits as a bf16 tensor-core GEMM (fp32 out) instead of the per-(token,
+            // expert) warp-dot, which re-read the [E,H] router weight once per token (13.8% of
+            // prefill @32k). fp32 accumulate + fp32 store keep top-k selection bit-faithful.
+            static const int router_mma = []{ const char* e = getenv("SPARKINFER_PREFILL_ROUTER_MMA");
+                                               return (e && e[0] == '0') ? 0 : 1; }();
+            if (router_mma) kernels::launch_prefill_gemm_f32(hn, rw, mlogits, N, E, H, st);
+            else            kernels::launch_pfm_router_logits(hn, rw, mlogits, N, E, H, st);
             pf_cu(cudaMemsetAsync(mcounts, 0, E * sizeof(int), st), "moe counts zero");
             kernels::launch_moe_router(mlogits, mids, mweights, mcounts, N, E, topk, 1, st);
             kernels::launch_pfm_bucket_pairs_bm(mids, mweights, mcounts, moffsets, mcursors,
