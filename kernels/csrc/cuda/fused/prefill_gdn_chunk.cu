@@ -205,8 +205,12 @@ __global__ void pf_gdnc_prep_kernel(const __nv_bfloat16* __restrict__ q,
     }
 
     // ---- W^ = T . (b_m exp(G_m) k_m) ----
+    // w_buf/u_buf are sized to n_tokens (not n_chunks*C). On a short final chunk only the live
+    // rows are valid addresses — writing the padded tail (i >= len) overruns into/past u_buf
+    // and faults (IMA at e.g. prompt lengths 289..301). Scan already treats i >= len as zero.
     for (int e = tid; e < C * HD; e += nthr) {
         const int i = e / HD, d = e - i * HD;
+        if (i >= len) continue;
         float acc = 0.f;
         for (int m = 0; m <= i; m++)
             acc += s_A[i * (C + PAD) + m] * (s_b[m] * __expf(s_g[m]) * gc_to_f(s_k[m * (HD + PAD) + d]));
@@ -222,6 +226,7 @@ __global__ void pf_gdnc_prep_kernel(const __nv_bfloat16* __restrict__ q,
     __syncthreads();
     for (int e = tid; e < C * HD; e += nthr) {
         const int i = e / HD, d = e - i * HD;
+        if (i >= len) continue;
         float acc = 0.f;
         for (int m = 0; m <= i; m++)
             acc += s_A[i * (C + PAD) + m] * (s_b[m] * gc_to_f(s_x[m * (HD + PAD) + d]));
