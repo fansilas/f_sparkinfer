@@ -20,10 +20,11 @@ namespace kernels {
 // Returns true if a kernel was launched, false if the caller should run its own (unsupported type,
 // a row shape outside the register budget, or disabled by env).
 //
-// BIT-IDENTICAL to #464's kernel: same deq_q4k_val / deq_q6k_val decode, same amax over the row
-// (max is associative and exact in fp, so the different thread->value map cannot move it), same
-// d = amax/127.f, same inv = 1.f/d guarded on d > 0, and the same roundf(v * inv) — v * inv, not
-// v / d; those differ in the last ulp.
+// BIT-IDENTICAL to #464's kernel: same deq_q4k_val / deq_q5k_val / deq_q6k_val decode, same amax
+// over the row (max is associative and exact in fp, so the different thread->value map cannot move
+// it), same d = amax/127.f, same inv = 1.f/d guarded on d > 0, and the same roundf(v * inv) — v * inv,
+// not v / d; those differ in the last ulp. Supports Q4_K/Q5_K/Q6_K. Plain/pair launchers require
+// cols % 1024 == 0; gather/mask also accept cols % 256 == 0 (MoE down Q5_K cols=512).
 //
 // Env knobs:
 //   SPARKINFER_DEQUANT_ROWS_I8_FAST  (default 1)  0 disables (A/B) -> falls through to #464's kernel.
