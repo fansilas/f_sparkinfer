@@ -277,6 +277,276 @@ __global__ __launch_bounds__(GROUP_BLKS * 32, 3) void pf_attn_mma_i8_kernel(
 
 }  // namespace
 
+// ============================================================================
+// GQA-fused int8 tensor-core prefill attention. One block owns BM query rows of
+// RQH query heads that SHARE one kv-head, so each K page and V tile is loaded from
+// the paged pool ONCE and fed to RQH mma's (one per q-head) instead of being
+// re-read once per q-head. Qwen3.6 attention is GQA-8 (16 q-heads / 2 kv-heads),
+// and the per-q-head kernel below re-loaded each kv-head's K/V 8x; that redundant
+// int8 K/V traffic is the bound (nsys: attn_mma = 17% of qwen36 prefill @32k).
+// RQH=1 is bit-identical to the per-head kernel. Math (mask, online softmax, int8
+// round) is unchanged -- only the load ordering differs.
+// ============================================================================
+template <int HEAD_DIM, int GROUP_BLKS, int RQH>
+__global__ __launch_bounds__(GROUP_BLKS * 32, (RQH <= 2 ? 2 : 1)) void pf_attn_mma_gqa_kernel(
+    const __nv_bfloat16* __restrict__ q, const signed char* __restrict__ k_pool,
+    const signed char* __restrict__ v_pool, const __half* __restrict__ k_scale,
+    const __half* __restrict__ v_scale, const int* __restrict__ block_table,
+    __nv_bfloat16* __restrict__ attn, int n_tokens, int n_q_heads, int n_kv_heads,
+    int block_size, int max_blocks_per_seq, float scale, int win_blocks) {
+    using namespace nvcuda::wmma;
+    constexpr int BM    = 16;
+    constexpr int GN    = GROUP_BLKS * 16;
+    constexpr int KH    = HEAD_DIM / 16;
+    constexpr int DTILE = HEAD_DIM / 16;
+    constexpr int WARPS = GROUP_BLKS;
+    constexpr int DPW   = DTILE / WARPS;
+    constexpr int QE    = HEAD_DIM / 32;
+
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, tid = threadIdx.x;
+    const int qbase = blockIdx.x * BM;
+    const int head0 = blockIdx.y * RQH;                       // first q-head this block owns
+    const int gqa   = n_q_heads / n_kv_heads;
+    const int kvh   = head0 / gqa;                            // all RQH heads share this kv-head
+    const size_t KVLD = (size_t)n_kv_heads * HEAD_DIM;
+    const int SLD = n_kv_heads;
+
+    extern __shared__ char mma_smem[];
+    // Per-q-head Q(int8), P(int8), scores(float); shared K/V scales; per-(qh,row) softmax state.
+    signed char* s_qi = reinterpret_cast<signed char*>(mma_smem);   // [RQH][BM][HEAD_DIM]
+    signed char* s_pi = s_qi + (size_t)RQH * BM * HEAD_DIM;          // [RQH][BM][GN]
+    float* s_s  = reinterpret_cast<float*>(s_pi + (size_t)RQH * BM * GN); // [RQH][BM][GN]
+    float* s_o  = s_s + (size_t)RQH * BM * GN;                       // [BM][HEAD_DIM] epilogue landing
+    float* s_ks = s_o + BM * HEAD_DIM;                               // [GN] shared
+    float* s_vs = s_ks + GN;                                         // [GN] shared
+    float* s_qs = s_vs + GN;                                         // [RQH][BM]
+    float* s_ps = s_qs + RQH * BM;                                   // [RQH][BM]
+    float* s_m  = s_ps + RQH * BM;                                   // [RQH][BM]
+    float* s_l  = s_m + RQH * BM;                                    // [RQH][BM]
+    float* s_corr = s_l + RQH * BM;                                  // [RQH][BM]
+
+    fragment<accumulator, 16, 16, 16, float> ofr[RQH][DPW];
+    fragment<accumulator, 16, 16, 16, int> idxf;
+    {
+        int* tile = reinterpret_cast<int*>(s_s) + warp * 256;
+        for (int i = lane; i < 256; i += 32) tile[i] = ((i >> 4) << 8) | (i & 15);
+        __syncwarp();
+        load_matrix_sync(idxf, tile, 16, mem_row_major);
+    }
+    #pragma unroll
+    for (int h = 0; h < RQH; h++)
+        #pragma unroll
+        for (int dd = 0; dd < DPW; dd++) fill_fragment(ofr[h][dd], 0.f);
+
+    // ---- load + quantize Q rows for each of the RQH heads ----
+    #pragma unroll
+    for (int h = 0; h < RQH; h++) {
+        const int head = head0 + h;
+        #pragma unroll
+        for (int rr = 0; rr < BM / WARPS; rr++) {
+            const int r = warp * (BM / WARPS) + rr;
+            const int qtok = qbase + r;
+            float qv[QE], amax = 0.f;
+            #pragma unroll
+            for (int e = 0; e < QE; e++) {
+                qv[e] = (qtok < n_tokens)
+                      ? __bfloat162float(q[((size_t)qtok * n_q_heads + head) * HEAD_DIM + lane + e * 32])
+                      : 0.f;
+                amax = fmaxf(amax, fabsf(qv[e]));
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+            const float d = amax / 127.0f;
+            if (lane == 0) s_qs[h * BM + r] = d;
+            #pragma unroll
+            for (int e = 0; e < QE; e++)
+                s_qi[((size_t)h * BM + r) * HEAD_DIM + lane + e * 32] =
+                    (signed char)((amax == 0.f) ? 0 : (int)roundf(qv[e] / d));
+        }
+    }
+    if (tid < RQH * BM) { s_m[tid] = -1e30f; s_l[tid] = 0.f; }
+    __syncthreads();
+
+    const int last_q = min(qbase + BM - 1, n_tokens - 1);
+    int blk_rs = 0;
+    if (win_blocks > 0) {
+        const int n_blk_q = (qbase + block_size) / block_size;
+        const int rsb = (win_blocks >= n_blk_q - 1) ? 1 : (n_blk_q - win_blocks);
+        blk_rs = rsb * block_size;
+    }
+    const bool split_sink = (win_blocks > 0) && (blk_rs > block_size);
+
+    auto run_range = [&](int lo, int hi) {
+        for (int k0 = lo; k0 < hi; k0 += GN) {
+            const int nk   = min(GN, hi - k0);
+            const int gblk = (nk + 15) / 16;
+            // K/V dequant scales for the group -- shared across all RQH heads (one kv-head).
+            for (int j = tid; j < gblk * 16; j += blockDim.x) {
+                const int lb = (k0 / block_size) + j / 16, within = j & 15;
+                const int pb = block_table[lb];
+                const size_t si = (size_t)(pb * block_size + within) * SLD + kvh;
+                s_ks[j] = __half2float(k_scale[si]);
+                s_vs[j] = __half2float(v_scale[si]);
+            }
+
+            // ---- QK: load each K page fragment ONCE, feed RQH q-heads ----
+            if (warp < gblk) {
+                const int pb = block_table[(k0 / block_size) + warp];
+                const signed char* kb =
+                    k_pool + ((size_t)pb * block_size * n_kv_heads + kvh) * HEAD_DIM;
+                fragment<matrix_a, 16, 16, 16, signed char, row_major> af;
+                fragment<matrix_b, 16, 16, 16, signed char, col_major> bf;
+                fragment<accumulator, 16, 16, 16, int> cf[RQH];
+                #pragma unroll
+                for (int h = 0; h < RQH; h++) fill_fragment(cf[h], 0);
+                #pragma unroll
+                for (int ks = 0; ks < KH; ks++) {
+                    load_matrix_sync(bf, kb + ks * 16, KVLD);        // K fragment: loaded once
+                    #pragma unroll
+                    for (int h = 0; h < RQH; h++) {
+                        load_matrix_sync(af, s_qi + ((size_t)h * BM) * HEAD_DIM + ks * 16, HEAD_DIM);
+                        mma_sync(cf[h], af, bf, cf[h]);
+                    }
+                }
+                #pragma unroll
+                for (int h = 0; h < RQH; h++)
+                    store_matrix_sync(reinterpret_cast<int*>(s_s) + (size_t)h * BM * GN + warp * 16,
+                                      cf[h], GN, mem_row_major);
+            }
+            __syncthreads();
+
+            // ---- online softmax per head; quantize P' ----
+            #pragma unroll
+            for (int h = 0; h < RQH; h++) {
+                const int qh_head = head0 + h;
+                const int* s_si = reinterpret_cast<const int*>(s_s) + (size_t)h * BM * GN;
+                float* s_sh = s_s + (size_t)h * BM * GN;
+                signed char* s_pih = s_pi + (size_t)h * BM * GN;
+                #pragma unroll
+                for (int rr = 0; rr < BM / WARPS; rr++) {
+                    const int r = warp * (BM / WARPS) + rr;
+                    const int qtok = qbase + r;
+                    float sc[GN / 32], mx = -1e30f;
+                    #pragma unroll
+                    for (int u = 0; u < GN / 32; u++) {
+                        const int t = lane + u * 32, gtok = k0 + t;
+                        const bool live = (t < gblk * 16) && (gtok < hi) && (qtok < n_tokens) &&
+                                          (gtok <= qtok) &&
+                                          (win_blocks <= 0 || gtok < block_size || gtok >= blk_rs);
+                        sc[u] = live ? (float)s_si[r * GN + t] * s_qs[h * BM + r] * s_ks[t] * scale : -1e30f;
+                        mx = fmaxf(mx, sc[u]);
+                    }
+                    #pragma unroll
+                    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+                    const float m_old = s_m[h * BM + r], m_new = fmaxf(m_old, mx), corr = __expf(m_old - m_new);
+                    float sum = 0.f, pamax = 0.f;
+                    #pragma unroll
+                    for (int u = 0; u < GN / 32; u++) {
+                        const int t = lane + u * 32;
+                        float pv = 0.f;
+                        if (sc[u] > -1e29f) {
+                            const float p = __expf(sc[u] - m_new);
+                            sum += p; pv = p * s_vs[t]; pamax = fmaxf(pamax, fabsf(pv));
+                        }
+                        s_sh[r * GN + t] = pv;
+                    }
+                    #pragma unroll
+                    for (int o = 16; o > 0; o >>= 1) {
+                        sum   += __shfl_xor_sync(0xffffffffu, sum, o);
+                        pamax  = fmaxf(pamax, __shfl_xor_sync(0xffffffffu, pamax, o));
+                    }
+                    const float pd = pamax / 127.0f;
+                    if (lane == 0) { s_m[h * BM + r] = m_new; s_l[h * BM + r] = s_l[h * BM + r] * corr + sum;
+                                     s_ps[h * BM + r] = pd; s_corr[h * BM + r] = corr; }
+                    for (int t = lane; t < gblk * 16; t += 32)
+                        s_pih[r * GN + t] =
+                            (signed char)((pamax == 0.f) ? 0 : (int)roundf(s_sh[r * GN + t] / pd));
+                }
+            }
+            __syncthreads();
+
+            // ---- PV: load each V tile fragment ONCE, feed RQH q-heads ----
+            #pragma unroll
+            for (int dd = 0; dd < DPW; dd++) {
+                const int dt = warp * DPW + dd;
+                fragment<accumulator, 16, 16, 16, int> cf[RQH];
+                #pragma unroll
+                for (int h = 0; h < RQH; h++) fill_fragment(cf[h], 0);
+                for (int ks = 0; ks < gblk; ks++) {
+                    const int pb = block_table[(k0 / block_size) + ks];
+                    const signed char* vb =
+                        v_pool + ((size_t)pb * block_size * n_kv_heads + kvh) * HEAD_DIM + dt * 16;
+                    fragment<matrix_a, 16, 16, 16, signed char, row_major> af;
+                    fragment<matrix_b, 16, 16, 16, signed char, row_major> bf;
+                    load_matrix_sync(bf, vb, KVLD);                  // V fragment: loaded once
+                    #pragma unroll
+                    for (int h = 0; h < RQH; h++) {
+                        load_matrix_sync(af, s_pi + (size_t)h * BM * GN + ks * 16, GN);
+                        mma_sync(cf[h], af, bf, cf[h]);
+                    }
+                }
+                #pragma unroll
+                for (int h = 0; h < RQH; h++)
+                    #pragma unroll
+                    for (int e = 0; e < 8; e++) {
+                        const int r = idxf.x[e] >> 8;
+                        ofr[h][dd].x[e] = __fmaf_rn((float)cf[h].x[e], s_ps[h * BM + r],
+                                                    __fmul_rn(ofr[h][dd].x[e], s_corr[h * BM + r]));
+                    }
+            }
+        }
+    };
+
+    if (split_sink) run_range(0, block_size);
+    run_range(split_sink ? blk_rs : 0, last_q + 1);
+
+    // ---- epilogue: one head at a time through the shared s_o landing zone ----
+    #pragma unroll
+    for (int h = 0; h < RQH; h++) {
+        const int head = head0 + h;
+        #pragma unroll
+        for (int dd = 0; dd < DPW; dd++)
+            store_matrix_sync(s_o + (warp * DPW + dd) * 16, ofr[h][dd], HEAD_DIM, mem_row_major);
+        __syncthreads();
+        for (int r = 0; r < BM; r++) {
+            const int qtok = qbase + r;
+            if (qtok >= n_tokens) break;
+            const float l = s_l[h * BM + r];
+            const float inv = (l > 0.f) ? (1.f / l) : 0.f;
+            for (int c = tid; c < HEAD_DIM; c += blockDim.x)
+                attn[((size_t)qtok * n_q_heads + head) * HEAD_DIM + c] =
+                    __float2bfloat16(s_o[r * HEAD_DIM + c] * inv);
+        }
+        __syncthreads();
+    }
+}
+
+template <int HD, int GROUP_BLKS, int RQH>
+static void launch_attn_gqa(const void* q, const signed char* k_pool, const signed char* v_pool,
+                            const void* k_scale, const void* v_scale, const int* block_table,
+                            void* attn, int n_tokens, int n_q_heads, int n_kv_heads,
+                            int block_size, int max_blocks_per_seq, float scale, int win_blocks,
+                            cudaStream_t stream) {
+    constexpr int BM = 16, GN = GROUP_BLKS * 16;
+    const size_t sm = (size_t)RQH * BM * HD                          // s_qi (int8)
+                    + (size_t)RQH * BM * GN                          // s_pi (int8)
+                    + (size_t)(RQH * BM * GN) * sizeof(float)        // s_s
+                    + (size_t)(BM * HD) * sizeof(float)              // s_o
+                    + (size_t)(2 * GN + 5 * RQH * BM) * sizeof(float);
+    static int cfg = 0;
+    if (!cfg) {
+        cudaFuncSetAttribute(pf_attn_mma_gqa_kernel<HD, GROUP_BLKS, RQH>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm);
+        cfg = 1;
+    }
+    dim3 grid((n_tokens + BM - 1) / BM, n_q_heads / RQH);
+    pf_attn_mma_gqa_kernel<HD, GROUP_BLKS, RQH><<<grid, GROUP_BLKS * 32, sm, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(q), k_pool, v_pool,
+        reinterpret_cast<const __half*>(k_scale), reinterpret_cast<const __half*>(v_scale),
+        block_table, reinterpret_cast<__nv_bfloat16*>(attn), n_tokens, n_q_heads, n_kv_heads,
+        block_size, max_blocks_per_seq, scale, win_blocks);
+}
+
 bool launch_prefill_attn_mma(
     const void* q, const signed char* k_pool, const signed char* v_pool,
     const void* k_scale, const void* v_scale, const int* block_table, void* attn,
@@ -292,22 +562,40 @@ bool launch_prefill_attn_mma(
         const char* e = getenv("SPARKINFER_PREFILL_ATTN_MMA_MINCTX");
         return e ? atoi(e) : 0;
     }();
-    // Same window selection as the merged scalar prefill (#455) / sparse-KV decode (#379).
     static const int win_blocks = [] {
         const char* e = getenv("SPARKINFER_PREFILL_ATTN_WINDOW");
         return e ? atoi(e) : 256;
+    }();
+    // GQA fusion: one block owns RQH q-heads sharing a kv-head, so each K page / V tile
+    // is loaded once and fed RQH mma's instead of being re-read per q-head. RQH=1 disables.
+    static const int gqa_rqh = [] {
+        const char* e = getenv("SPARKINFER_PREFILL_ATTN_GQA_RQH");
+        const int v = e ? atoi(e) : 4;
+        return (v == 1 || v == 2 || v == 4) ? v : 4;
     }();
 
     if (!enabled || head_dim != HD || block_size != 16 || n_tokens < minctx) return false;
     if (n_kv_heads <= 0 || n_q_heads % n_kv_heads != 0) return false;
 
-    constexpr int GN = GROUP_BLKS * 16;
-    const size_t sm = (size_t)BM * HD                 // s_qi (int8)
-                    + (size_t)BM * GN                 // s_pi (int8)
-                    + (size_t)(BM * GN) * sizeof(float)      // s_s
-                    + (size_t)(BM * HD) * sizeof(float)      // s_o (epilogue landing)
-                    + (size_t)(2 * GN + 5 * BM) * sizeof(float);  // scales + m/l/corr
+    const int gqa = n_q_heads / n_kv_heads;
+    if (gqa_rqh == 4 && gqa % 4 == 0) {
+        launch_attn_gqa<HD, GROUP_BLKS, 4>(q, k_pool, v_pool, k_scale, v_scale, block_table, attn,
+            n_tokens, n_q_heads, n_kv_heads, block_size, max_blocks_per_seq, scale, win_blocks, stream);
+        return true;
+    }
+    if (gqa_rqh >= 2 && gqa % 2 == 0) {
+        launch_attn_gqa<HD, GROUP_BLKS, 2>(q, k_pool, v_pool, k_scale, v_scale, block_table, attn,
+            n_tokens, n_q_heads, n_kv_heads, block_size, max_blocks_per_seq, scale, win_blocks, stream);
+        return true;
+    }
 
+    // Fallback: original per-q-head kernel.
+    constexpr int GN = GROUP_BLKS * 16;
+    const size_t sm = (size_t)BM * HD
+                    + (size_t)BM * GN
+                    + (size_t)(BM * GN) * sizeof(float)
+                    + (size_t)(BM * HD) * sizeof(float)
+                    + (size_t)(2 * GN + 5 * BM) * sizeof(float);
     static int cfg = 0;
     if (!cfg) {
         cudaFuncSetAttribute(pf_attn_mma_i8_kernel<HD, GROUP_BLKS>,
@@ -322,6 +610,7 @@ bool launch_prefill_attn_mma(
         block_size, max_blocks_per_seq, scale, win_blocks);
     return true;
 }
+
 
 }  // namespace kernels
 }  // namespace sparkinfer
