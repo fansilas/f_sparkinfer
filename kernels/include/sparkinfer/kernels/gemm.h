@@ -98,6 +98,15 @@ void launch_attn_qkv_mmvq_q4k(const void* q81,
     const void* Wq, const void* Wk, const void* Wv,
     void* yq, void* yk, void* yv,
     int Nq, int Nk, int Nv, int K, cudaStream_t stream = nullptr);
+// Same, for Q8_0-quantized attn_q/attn_k/attn_v (K=2048/4096).
+void launch_attn_qkv_mmvq_q80(const void* q81,
+    const void* Wq, const void* Wk, const void* Wv,
+    void* yq, void* yk, void* yv,
+    int Nq, int Nk, int Nv, int K, cudaStream_t stream = nullptr);
+// GDN ssm_alpha + ssm_beta: two independent native-bf16 [N,K] projections of the same
+// activation x, one split-K launch instead of two (UD quant keeps these unquantized).
+void launch_gdn_alpha_beta_gemv(const void* x, const void* Wa, const void* Wb,
+    void* ya, void* yb, int Na, int Nb, int K, cudaStream_t stream = nullptr);
 // 1-warp-per-row Q6_K dp4a GEMV (large-N, e.g. LM head): GEMV_WPB rows/block.
 void launch_gemv_q6k_dp4a_f32(const void* q81, const void* W, float* y, int N, int K, cudaStream_t stream = nullptr);
 // M activation rows vs one shared Q6_K weight (DFlash draft head: B block tokens, same lm_head).

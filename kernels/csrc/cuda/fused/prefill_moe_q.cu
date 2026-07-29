@@ -282,6 +282,237 @@ __global__ __launch_bounds__(256, 3) void pfm_moe_gemm_qi8_kernel(
     }
 }
 
+// XOR swizzle at 16B granularity (identical formula to prefill_moe_mma.cu's pfm_moe_gemm_i8_mma_kernel,
+// which applies the same native-mma.sync upgrade to the sibling materialize-path GEMM).
+__device__ __forceinline__ int qmm_swz(int k, int row) {
+    return (((k >> 4) ^ (row & 3)) << 4) | (k & 15);
+}
+__device__ __forceinline__ void qmm_cp16(void* dst, const void* src, bool pred) {
+    if (pred) __pipeline_memcpy_async(dst, src, 16);
+    else      *reinterpret_cast<uint4*>(dst) = make_uint4(0u, 0u, 0u, 0u);
+}
+__device__ __forceinline__ void qmm_ldm_x4(unsigned& r0, unsigned& r1, unsigned& r2, unsigned& r3,
+                                           const signed char* p) {
+    const unsigned a = (unsigned)__cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
+}
+
+// Decode the 64 values of sub-block pair `j64` of one super-block into int8, writing into a
+// SWIZZLED 64-wide destination row (qmm_swz(k,row) in place of the straight j64*64+k offset
+// qm_decode_j64 uses) so ldmatrix can consume it. Otherwise byte-identical to qm_decode_j64:
+// same bd/bdmin/scale-min unpack, same left-to-right ds*nib-dm evaluation, same roundf+cast.
+template <int QT>
+__device__ __forceinline__ void qmm_decode_j64_swz(const unsigned char* __restrict__ blk, int j64,
+                                                    float inv, int row, signed char* __restrict__ dst) {
+    const float bd = qm_h2f(blk), bdmin = qm_h2f(blk + 2);
+    const unsigned char* sc = blk + 4;
+    const unsigned char* qs = (QT == QMQ_Q4_K) ? (blk + 16) : (blk + 48);
+    int s0, m0, s1, m1;
+    qm_scale_min(sc, 2 * j64,     &s0, &m0);
+    qm_scale_min(sc, 2 * j64 + 1, &s1, &m1);
+    const float ds0 = bd * s0, dm0 = bdmin * m0;
+    const float ds1 = bd * s1, dm1 = bdmin * m1;
+    const unsigned char* qb = qs + j64 * 32;
+    const unsigned char* qh = blk + 16;
+    const int shl = 2 * j64, shh = 2 * j64 + 1;
+#pragma unroll
+    for (int c = 0; c < 2; c++) {
+        const uint4 qv = *reinterpret_cast<const uint4*>(qb + c * 16);
+        uint4 hv = make_uint4(0u, 0u, 0u, 0u);
+        if (QT == QMQ_Q5_K) hv = *reinterpret_cast<const uint4*>(qh + c * 16);
+        uint4 vlo, vhi;
+#pragma unroll
+        for (int w = 0; w < 4; w++) {
+            const unsigned qwd = (w == 0) ? qv.x : (w == 1) ? qv.y : (w == 2) ? qv.z : qv.w;
+            const unsigned hwd = (w == 0) ? hv.x : (w == 1) ? hv.y : (w == 2) ? hv.z : hv.w;
+            unsigned alo = 0, ahi = 0;
+#pragma unroll
+            for (int b = 0; b < 4; b++) {
+                const int sb8 = 8 * b;
+                const unsigned byte = (qwd >> sb8) & 0xFFu;
+                int nlo = (int)(byte & 0xFu), nhi = (int)(byte >> 4);
+                if (QT == QMQ_Q5_K) {
+                    const unsigned hb = (hwd >> sb8) & 0xFFu;
+                    nlo += ((hb >> shl) & 1u) ? 16 : 0;
+                    nhi += ((hb >> shh) & 1u) ? 16 : 0;
+                }
+                const int qlo = (int)roundf((ds0 * nlo - dm0) * inv);
+                const int qhi = (int)roundf((ds1 * nhi - dm1) * inv);
+                alo |= ((unsigned)(qlo & 0xFF)) << sb8;
+                ahi |= ((unsigned)(qhi & 0xFF)) << sb8;
+            }
+            if (w == 0)      { vlo.x = alo; vhi.x = ahi; }
+            else if (w == 1) { vlo.y = alo; vhi.y = ahi; }
+            else if (w == 2) { vlo.z = alo; vhi.z = ahi; }
+            else             { vlo.w = alo; vhi.w = ahi; }
+        }
+        *reinterpret_cast<uint4*>(dst + qmm_swz(c * 16, row))      = vlo;
+        *reinterpret_cast<uint4*>(dst + qmm_swz(32 + c * 16, row)) = vhi;
+    }
+}
+
+// Native int8 mma.sync (m16n8k32) variant of pfm_moe_gemm_qi8_kernel, for the gate/up
+// (C_SCATTER=false) case only -- mirrors prefill_moe_mma.cu's pfm_moe_gemm_i8_mma_kernel finding
+// that the down/scatter projection is scatter-bound and doesn't benefit from the native shape.
+// Same QM_BM=128 x QM_BN=64 tile and decode-on-read as pfm_moe_gemm_qi8_kernel; the K loop is
+// restructured to 64-wide chunks (QMM_BK) so each chunk is exactly one qm_decode_j64 call's
+// worth of output, decoded straight into a swizzled single-buffer Bs (no B-side prefetch -- the
+// decode is ALU work, not a cp.async copy) while As keeps the double-buffered cp.async prefetch.
+// int8 x int8 -> int32 accumulation is exact, so this is bit-identical to the wmma kernel; only
+// the tensor-core instruction shape and smem layout change.
+constexpr int QMM_BK = 64;
+constexpr int QMM_MFRAG = 2;   // 32 rows/warp / 16
+constexpr int QMM_NFRAG = 4;   // 32 cols/warp / 8  (QM_BN=64 / 2 warps-in-N = 32/warp)
+
+template <int QT, bool A_INDIRECT>
+__global__ __launch_bounds__(256, 2) void pfm_moe_gemm_qi8_mma_kernel(
+        const signed char* __restrict__ A_i8, const float* __restrict__ sx,
+        const unsigned char* __restrict__ W_q, const float* __restrict__ row_scale,
+        const int* __restrict__ pair_tok, const float* __restrict__ pair_w,
+        const int* __restrict__ offsets, const int* __restrict__ tilemap,
+        const int* __restrict__ d_ntiles,
+        __nv_bfloat16* __restrict__ C, float* __restrict__ out_f32,
+        int N, int K) {
+    constexpr int BS = qm_bs<QT>();
+    const int tile = blockIdx.y;
+    if (tile >= d_ntiles[0]) return;
+    const int e   = tilemap[2 * tile];
+    const int mt  = tilemap[2 * tile + 1];
+    const int p0  = offsets[e] + mt * QM_BM;
+    const int cnt = offsets[e + 1] - offsets[e];
+    const int M   = min(QM_BM, cnt - mt * QM_BM);
+    const int n0  = blockIdx.x * QM_BN;
+    const int nsb = K >> 8;
+    const int nk  = (K + QMM_BK - 1) / QMM_BK;      // == nsb * 4
+
+    __shared__ __align__(16) signed char As[2][QM_BM][QMM_BK];
+    __shared__ __align__(16) signed char Bs[QM_BN][QM_SB];
+    __shared__ int s_tok[QM_BM];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5, lane = tid & 31;
+    const int grp = lane >> 2, tig = lane & 3;
+    const int sub = lane >> 3, lrow = lane & 7;
+    const int wm = warp & 3, wn = warp >> 2;
+
+    const float* swe = row_scale + (size_t)e * N;
+
+    for (int r = tid; r < QM_BM; r += blockDim.x)
+        s_tok[r] = (r < M) ? (A_INDIRECT ? pair_tok[p0 + r] : (p0 + r)) : -1;
+
+    const int dr = tid >> 2, dj = tid & 3;
+    const int dgn = n0 + dr;
+    const bool drow_ok = dgn < N;
+    const unsigned char* drow = W_q + ((size_t)e * N + (drow_ok ? dgn : 0)) * (size_t)nsb * BS;
+    const float dscale = drow_ok ? swe[dgn] : 0.f;
+    const float dinv = (dscale > 0.f) ? (1.f / dscale) : 0.f;
+
+    int acc[QMM_MFRAG][QMM_NFRAG][4];
+#pragma unroll
+    for (int i = 0; i < QMM_MFRAG; i++)
+#pragma unroll
+        for (int j = 0; j < QMM_NFRAG; j++)
+#pragma unroll
+            for (int e2 = 0; e2 < 4; e2++) acc[i][j][e2] = 0;
+
+    auto stageA = [&](int buf, int k0) {
+        for (int idx = tid; idx < QM_BM * 4; idx += blockDim.x) {
+            const int r = idx >> 2, c16 = (idx & 3) * 16;
+            const int arow = s_tok[r];
+            qmm_cp16(&As[buf][r][qmm_swz(c16, r)], &A_i8[(size_t)max(arow, 0) * K + k0 + c16],
+                    arow >= 0 && (k0 + c16) < K);
+        }
+        __pipeline_commit();
+    };
+
+    __syncthreads();
+    stageA(0, 0);
+    int abuf = 0;
+
+    for (int sb = 0; sb < nsb; sb++) {
+        __syncthreads();      // previous superblock's MMA finished reading Bs
+        // Decode the FULL 256-wide superblock in one parallel step: all 4 threads-per-row (dj)
+        // decode a DIFFERENT quadrant simultaneously, same occupancy as pfm_moe_gemm_qi8_kernel's
+        // decode phase -- only the destination is now swizzled (per 64-wide quadrant) for
+        // ldmatrix, and the K loop below drives the consumption with native mma.sync instead of
+        // wmma. Splitting this one thread-per-row (as an earlier draft did) starved the decode
+        // phase to 1/4 occupancy and made the kernel slower than the wmma path it replaces --
+        // measured regression, not just theory: fixed here by keeping the original's full
+        // 4-way-parallel decode and only changing what consumes Bs afterward.
+        if (drow_ok) {
+            qmm_decode_j64_swz<QT>(drow + (size_t)sb * BS, dj, dinv, dr, &Bs[dr][dj * 64]);
+        } else if (dj == 0) {
+#pragma unroll
+            for (int q = 0; q < 4; q++)
+#pragma unroll
+                for (int c16 = 0; c16 < 64; c16 += 16)
+                    *reinterpret_cast<uint4*>(&Bs[dr][q * 64 + qmm_swz(c16, dr)]) = make_uint4(0u, 0u, 0u, 0u);
+        }
+        __syncthreads();      // Bs ready
+
+        for (int chunk = 0; chunk < 4; chunk++) {
+            const int t = sb * 4 + chunk;
+            if (t + 1 < nk) stageA(abuf ^ 1, (t + 1) * QMM_BK);
+            __pipeline_wait_prior(t + 1 < nk ? 1 : 0);
+            __syncthreads();
+
+#pragma unroll
+            for (int kk = 0; kk < QMM_BK; kk += 32) {
+                unsigned af[QMM_MFRAG][4], bf[QMM_NFRAG][2];
+#pragma unroll
+                for (int i = 0; i < QMM_MFRAG; i++) {
+                    const int row = wm * 32 + i * 16 + (sub & 1) * 8 + lrow;
+                    qmm_ldm_x4(af[i][0], af[i][1], af[i][2], af[i][3],
+                              &As[abuf][row][qmm_swz(kk + (sub >> 1) * 16, row)]);
+                }
+#pragma unroll
+                for (int jp = 0; jp < QMM_NFRAG; jp += 2) {
+                    const int col = wn * 32 + (jp + (sub >> 1)) * 8 + lrow;
+                    qmm_ldm_x4(bf[jp][0], bf[jp][1], bf[jp + 1][0], bf[jp + 1][1],
+                              &Bs[col][chunk * 64 + qmm_swz(kk + (sub & 1) * 16, col)]);
+                }
+#pragma unroll
+                for (int i = 0; i < QMM_MFRAG; i++)
+#pragma unroll
+                    for (int j = 0; j < QMM_NFRAG; j++)
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+                            : "+r"(acc[i][j][0]), "+r"(acc[i][j][1]), "+r"(acc[i][j][2]), "+r"(acc[i][j][3])
+                            : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]),
+                              "r"(bf[j][0]), "r"(bf[j][1]));
+            }
+            __syncthreads();
+            abuf ^= 1;
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < QMM_MFRAG; i++) {
+#pragma unroll
+        for (int j = 0; j < QMM_NFRAG; j++) {
+#pragma unroll
+            for (int e2 = 0; e2 < 4; e2++) {
+                const int rm = wm * 32 + i * 16 + grp + (e2 >> 1) * 8;
+                const int gn = n0 + wn * 32 + j * 8 + tig * 2 + (e2 & 1);
+                if (rm < M && gn < N) {
+                    const int p = p0 + rm;
+                    const int srow = A_INDIRECT ? s_tok[rm] : p;
+                    const float v = (float)acc[i][j][e2] * sx[srow] * swe[gn];
+                    C[(size_t)p * N + gn] = __float2bfloat16(v);
+                }
+            }
+        }
+    }
+}
+
+static bool qi8_moe_mma_enabled() {
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("SPARKINFER_PREFILL_MOE_Q_MMA"); v = (e && e[0] == '0') ? 0 : 1; }
+    return v;
+}
+
 template <int QT>
 void dispatch_qi8(const signed char* A_i8, const float* sx, const void* W_q, const float* row_scale,
                   const int* pair_tok, const float* pair_w, const int* offsets,
@@ -290,6 +521,19 @@ void dispatch_qi8(const signed char* A_i8, const float* sx, const void* W_q, con
                   bool a_indirect, bool c_scatter, cudaStream_t stream) {
     dim3 grid((n_out + QM_BN - 1) / QM_BN, max_tiles);
     const auto* W = reinterpret_cast<const unsigned char*>(W_q);
+    // Native mma.sync (default ON): gate/up only (C_SCATTER=false) -- the down projection is
+    // scatter-bound and doesn't benefit from the native k32 shape (see prefill_moe_mma.cu's
+    // identical finding for the sibling materialize-path GEMM). SPARKINFER_PREFILL_MOE_Q_MMA=0
+    // restores the wmma path for A/B.
+    if (!c_scatter && qi8_moe_mma_enabled()) {
+        if (a_indirect)
+            pfm_moe_gemm_qi8_mma_kernel<QT, true><<<grid, 256, 0, stream>>>(
+                A_i8, sx, W, row_scale, pair_tok, pair_w, offsets, tilemap, d_ntiles, C, out_f32, n_out, K);
+        else
+            pfm_moe_gemm_qi8_mma_kernel<QT, false><<<grid, 256, 0, stream>>>(
+                A_i8, sx, W, row_scale, pair_tok, pair_w, offsets, tilemap, d_ntiles, C, out_f32, n_out, K);
+        return;
+    }
     if (a_indirect && !c_scatter)
         pfm_moe_gemm_qi8_kernel<QT, true, false><<<grid, 256, 0, stream>>>(
             A_i8, sx, W, row_scale, pair_tok, pair_w, offsets, tilemap, d_ntiles, C, out_f32, n_out, K);

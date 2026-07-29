@@ -716,6 +716,20 @@ int Qwen35Model::forward_token(int token_id, int position, bool sample) {
                 kernels::launch_gemm(x, W, y, 1, N, K, 1.f, 0.f, gc, st);
             }
         };
+        // ssm_alpha/ssm_beta are two independent small (H -> linear_v_heads) projections of the
+        // SAME xn; UD quant schemes keep them native/unquantized (type 0), which otherwise sends
+        // each through its own proj_xn -> launch_gemv call. Fuse them into one split-K launch
+        // (bit-identical math, same per-row 8-way split-K as gemv_f32_sk_kernel<bf16,8>) when
+        // both are unquantized; any other type combination keeps the existing per-tensor dispatch.
+        auto proj_gdn_alpha_beta = [&](cudaStream_t pst) {
+            if (s.gguf && w.ssm_alpha_type == 0 && w.ssm_beta_type == 0) {
+                kernels::launch_gdn_alpha_beta_gemv(s.xn, w.ssm_alpha, w.ssm_beta,
+                    s.lin_alpha, s.lin_beta, c.linear_v_heads, c.linear_v_heads, H, pst);
+            } else {
+                proj_xn(w.ssm_alpha, w.ssm_alpha_type, s.lin_alpha, c.linear_v_heads, pst);
+                proj_xn(w.ssm_beta, w.ssm_beta_type, s.lin_beta, c.linear_v_heads, pst);
+            }
+        };
 
         if (w.linear_attn) {
             const bool any_q4k = (w.wqkv_type == 12 || w.wqkv_gate_type == 12 ||
@@ -744,8 +758,7 @@ int Qwen35Model::forward_token(int token_id, int position, bool sample) {
             } else if (gdn_fused_proj && gdn_pipelined) {
                 cudaEventRecord(s.ev_pipe_fork, st);
                 cudaStreamWaitEvent(s.stream_v, s.ev_pipe_fork, 0);
-                proj_xn(w.ssm_alpha, w.ssm_alpha_type, s.lin_alpha, c.linear_v_heads, s.stream_v);
-                proj_xn(w.ssm_beta, w.ssm_beta_type, s.lin_beta, c.linear_v_heads, s.stream_v);
+                proj_gdn_alpha_beta(s.stream_v);
                 cudaEventRecord(s.ev_gdn_ab, s.stream_v);
                 kernels::launch_mmvq_gdn_qkv_z_pack2(s.aq81, w.wqkv, w.wqkv_gate,
                                                        s.lin_qkv, s.lin_z,
@@ -756,21 +769,18 @@ int Qwen35Model::forward_token(int token_id, int position, bool sample) {
                 cudaStreamWaitEvent(s.stream_v, s.ev_pipe_fork, 0);
                 proj_xn(w.wqkv_gate, w.wqkv_gate_type, s.lin_z, s.linear_vdim, s.stream_k);
                 cudaEventRecord(s.ev_gdn_z, s.stream_k);
-                proj_xn(w.ssm_alpha, w.ssm_alpha_type, s.lin_alpha, c.linear_v_heads, s.stream_v);
-                proj_xn(w.ssm_beta, w.ssm_beta_type, s.lin_beta, c.linear_v_heads, s.stream_v);
+                proj_gdn_alpha_beta(s.stream_v);
                 cudaEventRecord(s.ev_gdn_ab, s.stream_v);
                 proj_xn(w.wqkv, w.wqkv_type, s.lin_qkv, s.linear_qkvdim, st);
             } else if (gdn_fused_proj) {
                 kernels::launch_mmvq_gdn_qkv_z_pack2(s.aq81, w.wqkv, w.wqkv_gate,
                                                        s.lin_qkv, s.lin_z,
                                                        s.linear_qkvdim, s.linear_vdim, H, st);
-                proj_xn(w.ssm_alpha, w.ssm_alpha_type, s.lin_alpha, c.linear_v_heads, st);
-                proj_xn(w.ssm_beta, w.ssm_beta_type, s.lin_beta, c.linear_v_heads, st);
+                proj_gdn_alpha_beta(st);
             } else {
                 proj_xn(w.wqkv, w.wqkv_type, s.lin_qkv, s.linear_qkvdim, st);
                 proj_xn(w.wqkv_gate, w.wqkv_gate_type, s.lin_z, s.linear_vdim, st);
-                proj_xn(w.ssm_alpha, w.ssm_alpha_type, s.lin_alpha, c.linear_v_heads, st);
-                proj_xn(w.ssm_beta, w.ssm_beta_type, s.lin_beta, c.linear_v_heads, st);
+                proj_gdn_alpha_beta(st);
             }
 
             bf16* conv_state = s.lin_conv_state +
@@ -838,8 +848,16 @@ int Qwen35Model::forward_token(int token_id, int position, bool sample) {
                 const int nq = w.q_has_gate ? s.qdim * 2 : s.qdim;
                 const bool attn_qkv = s.use_attn_qkv && s.use_pq && s.use_llama && (H == 2048 || H == 4096)
                                    && w.wq_type == 12 && w.wk_type == 12 && w.wv_type == 12;
+                // Same fusion, for the Q8_0 attn weights the Qwen3.6 UD Q4_K_M checkpoints actually
+                // ship (attn_qkv above never engages for them since wq/wk/wv aren't Q4_K there).
+                const bool attn_qkv_q80 = !attn_qkv && s.use_attn_qkv && s.use_pq && s.use_llama
+                                   && (H == 2048 || H == 4096)
+                                   && w.wq_type == 8 && w.wk_type == 8 && w.wv_type == 8;
                 if (attn_qkv) {
                     kernels::launch_attn_qkv_mmvq_q4k(s.aq81, w.wq, w.wk, w.wv,
+                        w.q_has_gate ? s.qraw : s.q, s.k, s.v, nq, s.kvdim, s.kvdim, H, st);
+                } else if (attn_qkv_q80) {
+                    kernels::launch_attn_qkv_mmvq_q80(s.aq81, w.wq, w.wk, w.wv,
                         w.q_has_gate ? s.qraw : s.q, s.k, s.v, nq, s.kvdim, s.kvdim, H, st);
                 } else if (s.use_qkvstream) {
                     cudaEventRecord(s.ev_qkv, st);

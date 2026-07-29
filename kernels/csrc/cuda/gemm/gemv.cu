@@ -111,6 +111,50 @@ template __global__ void gemv_f32_sk_kernel<__nv_bfloat16, 4>(const __nv_bfloat1
 #ifndef _MSC_VER
 template __global__ void gemv_f32_sk_kernel<__nv_bfloat16, 8>(const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int);
 #endif
+// Fused two-projection split-K GEMV: same xn activation, two independent [N,K] bf16 weight
+// matrices (Wa, Wb), concatenated into one grid. Used for GDN's ssm_alpha/ssm_beta gates, which
+// UD quant schemes keep native/unquantized (dequantized to bf16 at load) and would otherwise pay
+// two separate gemv_f32_sk_kernel<bf16,8> launches back to back on the same stream every decode
+// step. Fixed at S=8, RPB=1 row/block (the split gemv_f32_sk_kernel path Na/Nb this small always
+// picks) so the per-row math and reduction order are bit-identical to running it twice.
+__global__ void gemv_f32_sk_dual_kernel(const __nv_bfloat16* __restrict__ x,
+                                        const __nv_bfloat16* __restrict__ Wa,
+                                        const __nv_bfloat16* __restrict__ Wb,
+                                        __nv_bfloat16* __restrict__ ya, __nv_bfloat16* __restrict__ yb,
+                                        int Na, int Nb, int K) {
+    constexpr int S = 8;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row = blockIdx.x;
+    if (row >= Na + Nb) return;
+    const __nv_bfloat16* W; __nv_bfloat16* y; int n;
+    if (row < Na) { W = Wa; y = ya; n = row; }
+    else          { W = Wb; y = yb; n = row - Na; }
+    const uint4* row4 = reinterpret_cast<const uint4*>(W + (size_t)n * K);
+    const uint4* x4 = reinterpret_cast<const uint4*>(x);
+    const int n4 = K / 8;
+    float acc = 0.f;
+    for (int i = warp * 32 + lane; i < n4; i += S * 32) {
+        uint4 wv = row4[i], xv = x4[i];
+        const __nv_bfloat162* wh = reinterpret_cast<const __nv_bfloat162*>(&wv);
+        const __nv_bfloat162* xh = reinterpret_cast<const __nv_bfloat162*>(&xv);
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            float2 wf = __bfloat1622float2(wh[j]), xf = __bfloat1622float2(xh[j]);
+            acc += wf.x * xf.x + wf.y * xf.y;
+        }
+    }
+    #pragma unroll
+    for (int m = 16; m > 0; m >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, m);
+    __shared__ float s_part[S];
+    if (lane == 0) s_part[warp] = acc;
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float o = 0.f;
+        #pragma unroll
+        for (int s = 0; s < S; s++) o += s_part[s];
+        y[n] = __float2bfloat16(o);
+    }
+}
 // ---- quantized on-read GEMV (W = GGUF-native Q4_K/Q6_K [N,K]) -----------------
 // Dequantizes each 256-block in registers and dots with a full-precision (fp32)
 // activation — reads the quantized weight bytes (~4x less than bf16) with NO int8
@@ -902,6 +946,54 @@ template __global__ void si_attn_qkv_mmvq_q4k_kernel<__nv_bfloat16, 8>(const si_
 template __global__ void si_attn_qkv_mmvq_q4k_kernel<__nv_bfloat16, 16>(const si_block_q8_1*, const unsigned char*,
     const unsigned char*, const unsigned char*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int);
 #endif
+// Full-attn decode: Q+K+V Q8_0 projections from one block_q8_1 activation in one grid. Same
+// row-dispatch structure as si_attn_qkv_mmvq_q4k_kernel (one block per output row, concatenated
+// Q/K/V row ranges), with si_vec_dot_q8_0_mmvq in place of si_vec_dot_q4_K — bit-identical to
+// running si_mmvq_q80_kfixed_kernel on Wq, Wk, Wv separately, just one launch instead of three.
+// Qwen3.6 UD Q4_K_M keeps attn_q/attn_k/attn_v as Q8_0 (not Q4_K), so this is the path that
+// actually engages for that checkpoint's full-attention layers.
+template <typename OutT, int NBLOCKS>
+__global__ void si_attn_qkv_mmvq_q80_kernel(
+    const si_block_q8_1* __restrict__ vy,
+    const unsigned char* __restrict__ Wq, const unsigned char* __restrict__ Wk,
+    const unsigned char* __restrict__ Wv,
+    OutT* __restrict__ yq, OutT* __restrict__ yk, OutT* __restrict__ yv,
+    int Nq, int Nk, int Nv) {
+    constexpr int NW = 4, WS = 32;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, tid = threadIdx.x;
+    const int row = blockIdx.x;
+    const int nq = Nq, nk = Nq + Nk;
+    const int total = nk + Nv;
+    if (row >= total) return;
+    const unsigned char* W;
+    OutT* y;
+    int lrow;
+    if (row < nq)       { W = Wq; y = yq; lrow = row; }
+    else if (row < nk)  { W = Wk; y = yk; lrow = row - Nq; }
+    else                { W = Wv; y = yv; lrow = row - nk; }
+    const unsigned char* w_row = W + (size_t)lrow * NBLOCKS * 34;
+    float tmp = 0.0f;
+    #pragma unroll
+    for (int kb = tid; kb < NBLOCKS; kb += NW * WS)
+        tmp += si_vec_dot_q8_0_mmvq(w_row + (size_t)kb * 34, vy + kb);
+    __shared__ float tmp_shared[NW - 1][WS];
+    if (warp > 0) tmp_shared[warp - 1][lane] = tmp;
+    __syncthreads();
+    if (warp > 0) return;
+    #pragma unroll
+    for (int l = 0; l < NW - 1; l++) tmp += tmp_shared[l][lane];
+    #pragma unroll
+    for (int m = 16; m > 0; m >>= 1) tmp += __shfl_xor_sync(0xffffffff, tmp, m);
+    if (lane == 0) gemv_write(y + lrow, tmp);
+}
+#ifndef _MSC_VER
+template __global__ void si_attn_qkv_mmvq_q80_kernel<__nv_bfloat16, 64>(const si_block_q8_1*, const unsigned char*,
+    const unsigned char*, const unsigned char*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int);
+#endif
+#ifndef _MSC_VER
+template __global__ void si_attn_qkv_mmvq_q80_kernel<__nv_bfloat16, 128>(const si_block_q8_1*, const unsigned char*,
+    const unsigned char*, const unsigned char*, __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, int, int, int);
+#endif
 // ===== faithful llama Q6_K mmvq for the fp32-path GEMVs (attn-V upgrades + LM head) =====
 // Same 4-warp-per-row structure as the Q4_K mmvq, with vec_dot_q6_K_q8_1 (coalesced
 // ql/qh int loads + __vsubss4 reconstruct + dp4a). Mirrors the #65 MoE-down dot.
@@ -1137,6 +1229,15 @@ void launch_gemv(const void* x, const void* W, void* y, int N, int K, cudaStream
         reinterpret_cast<__nv_bfloat16*>(y), N, K);
 }
 
+// Fused ssm_alpha + ssm_beta: two independent bf16 [N,K] projections of the same activation,
+// one launch instead of two. See gemv_f32_sk_dual_kernel for the split-K/bit-identity note.
+void launch_gdn_alpha_beta_gemv(const void* x, const void* Wa, const void* Wb,
+                                void* ya, void* yb, int Na, int Nb, int K, cudaStream_t stream) {
+    gemv_f32_sk_dual_kernel<<<Na + Nb, 8 * 32, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(x),
+        reinterpret_cast<const __nv_bfloat16*>(Wa), reinterpret_cast<const __nv_bfloat16*>(Wb),
+        reinterpret_cast<__nv_bfloat16*>(ya), reinterpret_cast<__nv_bfloat16*>(yb), Na, Nb, K);
+}
 // Fused GEMV + sigmoid for N=1 (shared-expert gate scalar). Delegates to the
 // faithful split-k launch_gemv + bf16-rounded sigmoid_scalar path.
 void launch_gemv_sigmoid(const void* x, const void* W, void* scratch_bf16, float* y, int K,
@@ -1449,6 +1550,33 @@ void launch_attn_qkv_mmvq_q4k(const void* q81,
         launch_mmvq_q4k(q81, Wq, yq, Nq, K, stream);
         launch_mmvq_q4k(q81, Wk, yk, Nk, K, stream);
         launch_mmvq_q4k(q81, Wv, yv, Nv, K, stream);
+    }
+}
+// Same fusion as launch_attn_qkv_mmvq_q4k, for Q8_0-quantized attn_q/attn_k/attn_v (the type the
+// Qwen3.6 UD Q4_K_M checkpoints actually ship attention weights in — the Q4_K fused path above
+// never engages for them). Falls back to three separate launch_mmvq_q80 calls for unsupported K.
+void launch_attn_qkv_mmvq_q80(const void* q81,
+    const void* Wq, const void* Wk, const void* Wv,
+    void* yq, void* yk, void* yv,
+    int Nq, int Nk, int Nv, int K, cudaStream_t stream) {
+    const int total = Nq + Nk + Nv;
+    const si_block_q8_1* q = reinterpret_cast<const si_block_q8_1*>(q81);
+    if (K == 2048)
+        si_attn_qkv_mmvq_q80_kernel<__nv_bfloat16, 64><<<total, 4 * 32, 0, stream>>>(
+            q, reinterpret_cast<const unsigned char*>(Wq), reinterpret_cast<const unsigned char*>(Wk),
+            reinterpret_cast<const unsigned char*>(Wv),
+            reinterpret_cast<__nv_bfloat16*>(yq), reinterpret_cast<__nv_bfloat16*>(yk),
+            reinterpret_cast<__nv_bfloat16*>(yv), Nq, Nk, Nv);
+    else if (K == 4096)
+        si_attn_qkv_mmvq_q80_kernel<__nv_bfloat16, 128><<<total, 4 * 32, 0, stream>>>(
+            q, reinterpret_cast<const unsigned char*>(Wq), reinterpret_cast<const unsigned char*>(Wk),
+            reinterpret_cast<const unsigned char*>(Wv),
+            reinterpret_cast<__nv_bfloat16*>(yq), reinterpret_cast<__nv_bfloat16*>(yk),
+            reinterpret_cast<__nv_bfloat16*>(yv), Nq, Nk, Nv);
+    else {
+        launch_mmvq_q80(q81, Wq, yq, Nq, K, stream);
+        launch_mmvq_q80(q81, Wk, yk, Nk, K, stream);
+        launch_mmvq_q80(q81, Wv, yv, Nv, K, stream);
     }
 }
 #endif
