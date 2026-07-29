@@ -143,6 +143,48 @@ __global__ void k_attn(const bf16* q, const bf16* k, const bf16* v, bf16* out,
         ov[i] = f2b(acc[i] * inv);
 }
 
+// Batched draft-model projection: Y[M,N] = X[M,K] @ W[N,K]^T. One warp per
+// output row n (blockIdx.x group), one block-row per batch element m
+// (blockIdx.y). Mirrors kernels::gemv_kernel's per-row math exactly (lane-
+// strided accumulation over K/8 float4 groups + warp shfl-xor tree) so a
+// batch of M rows reproduces the same M sequential single-row launches bit
+// for bit, while reusing each loaded W row across all M rows in one launch
+// instead of M separate kernel dispatches.
+static constexpr int DF_GEMM_WPB = 8; // warps (output rows) per block
+
+__device__ __forceinline__ float f2out(float v, float*) { return v; }
+__device__ __forceinline__ bf16 f2out(float v, bf16*) { return f2b(v); }
+
+template <typename OutT>
+__global__ void k_gemm_mn(const bf16* __restrict__ X, const bf16* __restrict__ W,
+                          OutT* __restrict__ Y, int N, int K) {
+    extern __shared__ float s_x[]; // K floats, staged once per block for this m
+    const int m = blockIdx.y;
+    const bf16* xm = X + (size_t)m * K;
+    for (int i = threadIdx.x; i < K; i += blockDim.x) s_x[i] = b2f(xm[i]);
+    __syncthreads();
+
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int n = blockIdx.x * DF_GEMM_WPB + warp;
+    if (n >= N) return;
+    const uint4* row4 = reinterpret_cast<const uint4*>(W + (size_t)n * K);
+    const int n4 = K / 8;
+    float acc = 0.f;
+    for (int i = lane; i < n4; i += 32) {
+        uint4 v = row4[i];
+        const __nv_bfloat162* h2 = reinterpret_cast<const __nv_bfloat162*>(&v);
+        const int base = i * 8;
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            float2 f = __bfloat1622float2(h2[j]);
+            acc += f.x * s_x[base + 2 * j] + f.y * s_x[base + 2 * j + 1];
+        }
+    }
+    #pragma unroll
+    for (int s = 16; s > 0; s >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, s);
+    if (lane == 0) Y[(size_t)m * N + n] = f2out(acc, (OutT*)nullptr);
+}
+
 } // namespace
 
 void launch_add(const void* x, const void* y, void* out, int n, cudaStream_t stream) {
@@ -185,6 +227,38 @@ void launch_attn_gqa(const void* q, const void* k, const void* v, void* out,
     k_attn<<<grid, 128, smem, stream>>>((const bf16*)q, (const bf16*)k, (const bf16*)v,
                                         (bf16*)out, q_len, kv_len, n_q, n_kv, d,
                                         q_pos0, k_pos0, window, scale);
+}
+
+// K can reach 16384 (the fc capture-projection: n_cap*hidden) — 64KB of staged
+// fp32 input exceeds the 48KB static/dynamic shared-memory default, so the
+// kernel's dynamic shared-memory ceiling must be raised once per instantiation.
+template <typename OutT>
+static void ensure_smem_opt_in(int smem) {
+    static int done_for = -1;
+    if (smem > 48 * 1024 && smem != done_for) {
+        cudaFuncSetAttribute(k_gemm_mn<OutT>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+        done_for = smem;
+    }
+}
+
+void launch_gemm_bf16(const void* X, const void* W, void* Y, int M, int N, int K,
+                      cudaStream_t stream) {
+    if (M <= 0 || N <= 0) return;
+    dim3 grid((N + DF_GEMM_WPB - 1) / DF_GEMM_WPB, M);
+    int smem = K * (int)sizeof(float);
+    ensure_smem_opt_in<bf16>(smem);
+    k_gemm_mn<bf16><<<grid, DF_GEMM_WPB * 32, smem, stream>>>(
+        (const bf16*)X, (const bf16*)W, (bf16*)Y, N, K);
+}
+
+void launch_gemm_f32(const void* X, const void* W, float* Y, int M, int N, int K,
+                     cudaStream_t stream) {
+    if (M <= 0 || N <= 0) return;
+    dim3 grid((N + DF_GEMM_WPB - 1) / DF_GEMM_WPB, M);
+    int smem = K * (int)sizeof(float);
+    ensure_smem_opt_in<float>(smem);
+    k_gemm_mn<float><<<grid, DF_GEMM_WPB * 32, smem, stream>>>(
+        (const bf16*)X, (const bf16*)W, Y, N, K);
 }
 
 } // namespace dflash_kernels

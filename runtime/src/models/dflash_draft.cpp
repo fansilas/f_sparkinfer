@@ -444,13 +444,10 @@ bool DFlashDraftModel::forward_block(const void* target_hidden, int ctx_len,
     kernels::launch_embedding(s.d_ids, s.embed, s.noise, B, H, st);
 
     // target_hidden [ctx, n_cap*H] -> fc -> hidden_norm -> target_proj [ctx, H]
-    // fc.weight is [H, n_cap*H] (out, in). Loop gemv per row.
+    // fc.weight is [H, n_cap*H] (out, in); one batched GEMM over all ctx rows.
     if (ctx_len > 0) {
         const bf16* th = (const bf16*)target_hidden;
-        for (int t = 0; t < ctx_len; t++) {
-            kernels::launch_gemv(th + (size_t)t * n_cap * H, s.fc,
-                                 s.target_proj + (size_t)t * H, H, n_cap * H, st);
-        }
+        dflash_kernels::launch_gemm_bf16(th, s.fc, s.target_proj, ctx_len, H, n_cap * H, st);
         dflash_kernels::launch_rms(s.target_proj, s.hidden_norm, s.target_proj,
                                    ctx_len, H, c.rms_eps, st);
     }
@@ -464,22 +461,14 @@ bool DFlashDraftModel::forward_block(const void* target_hidden, int ctx_len,
         dflash_kernels::launch_rms(s.x, w.input_norm, s.xn, B, H, c.rms_eps, st);
 
         // Q from noise, K/V from cat(target, noise)
-        for (int t = 0; t < B; t++) {
-            kernels::launch_gemv(s.xn + (size_t)t * H, w.wq, s.q + (size_t)t * qdim, qdim, H, st);
-        }
+        dflash_kernels::launch_gemm_bf16(s.xn, w.wq, s.q, B, qdim, H, st);
         // Build k_new / v_new = cat(k_ctx, k_noise)
-        for (int t = 0; t < ctx_len; t++) {
-            kernels::launch_gemv(s.target_proj + (size_t)t * H, w.wk,
-                                 s.k_new + (size_t)t * kvdim, kvdim, H, st);
-            kernels::launch_gemv(s.target_proj + (size_t)t * H, w.wv,
-                                 s.v_new + (size_t)t * kvdim, kvdim, H, st);
-        }
-        for (int t = 0; t < B; t++) {
-            kernels::launch_gemv(s.xn + (size_t)t * H, w.wk,
-                                 s.k_new + (size_t)(ctx_len + t) * kvdim, kvdim, H, st);
-            kernels::launch_gemv(s.xn + (size_t)t * H, w.wv,
-                                 s.v_new + (size_t)(ctx_len + t) * kvdim, kvdim, H, st);
-        }
+        dflash_kernels::launch_gemm_bf16(s.target_proj, w.wk, s.k_new, ctx_len, kvdim, H, st);
+        dflash_kernels::launch_gemm_bf16(s.target_proj, w.wv, s.v_new, ctx_len, kvdim, H, st);
+        dflash_kernels::launch_gemm_bf16(s.xn, w.wk, s.k_new + (size_t)ctx_len * kvdim,
+                                         B, kvdim, H, st);
+        dflash_kernels::launch_gemm_bf16(s.xn, w.wv, s.v_new + (size_t)ctx_len * kvdim,
+                                         B, kvdim, H, st);
 
         const int new_len = ctx_len + B;
         // Q / K RMSNorm per head
@@ -515,18 +504,14 @@ bool DFlashDraftModel::forward_block(const void* target_hidden, int ctx_len,
                                         B, kv_len, c.n_q_heads, c.n_kv_heads, d,
                                         q_pos0, /*k_pos0_cache=*/0, window, scale, st);
 
-        for (int t = 0; t < B; t++)
-            kernels::launch_gemv(s.attn + (size_t)t * qdim, w.wo, s.ao + (size_t)t * H, H, qdim, st);
+        dflash_kernels::launch_gemm_bf16(s.attn, w.wo, s.ao, B, H, qdim, st);
         dflash_kernels::launch_add(s.x, s.ao, s.h, B * H, st);
 
         dflash_kernels::launch_rms(s.h, w.post_norm, s.hn, B, H, c.rms_eps, st);
-        for (int t = 0; t < B; t++) {
-            kernels::launch_gemv(s.hn + (size_t)t * H, w.gate, s.gate + (size_t)t * I, I, H, st);
-            kernels::launch_gemv(s.hn + (size_t)t * H, w.up,   s.up   + (size_t)t * I, I, H, st);
-        }
+        dflash_kernels::launch_gemm_bf16(s.hn, w.gate, s.gate, B, I, H, st);
+        dflash_kernels::launch_gemm_bf16(s.hn, w.up, s.up, B, I, H, st);
         dflash_kernels::launch_swiglu(s.gate, s.up, s.gate, B * I, st);
-        for (int t = 0; t < B; t++)
-            kernels::launch_gemv(s.gate + (size_t)t * I, w.down, s.down + (size_t)t * H, H, I, st);
+        dflash_kernels::launch_gemm_bf16(s.gate, w.down, s.down, B, H, I, st);
         dflash_kernels::launch_add(s.h, s.down, s.x, B * H, st);
     }
 
@@ -534,13 +519,14 @@ bool DFlashDraftModel::forward_block(const void* target_hidden, int ctx_len,
 
     // LM head (target weights) -> logits / argmax. Skip row 0 for proposals but still compute.
     const int V = s.vocab > 0 ? s.vocab : c.vocab;
-    for (int t = 0; t < B; t++) {
-        const bf16* row = s.xn + (size_t)t * H;
-        float* logit_row = s.logits + (size_t)t * V;
-        if (s.lm_head_type)
+    if (s.lm_head_type) {
+        for (int t = 0; t < B; t++) {
+            const bf16* row = s.xn + (size_t)t * H;
+            float* logit_row = s.logits + (size_t)t * V;
             kernels::launch_gemv_q_f32(row, s.lm_head, s.lm_head_type, logit_row, V, H, st);
-        else
-            kernels::launch_gemv_f32(row, s.lm_head, logit_row, V, H, st);
+        }
+    } else {
+        dflash_kernels::launch_gemm_f32(s.xn, s.lm_head, s.logits, B, V, H, st);
     }
     kernels::launch_argmax(s.logits, s.d_out, B, V, st);
     cu(cudaMemcpyAsync(s.h_out, s.d_out, B * sizeof(int), cudaMemcpyDeviceToHost, st), "argmax");

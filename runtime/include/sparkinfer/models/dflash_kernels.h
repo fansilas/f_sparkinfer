@@ -34,5 +34,20 @@ void launch_rms(const void* x, const void* w, void* out, int rows, int cols,
 void launch_rms_heads(void* x, const void* w, int seq, int n_heads, int d,
                       float eps, cudaStream_t stream);
 
+// Batched draft-model projection: Y[M,N] = X[M,K] @ W[N,K]^T, W row-major
+// [out, in] bf16 (GGUF-native linear layout). Replaces M sequential
+// launch_gemv calls (one per draft/context token) with a single launch that
+// stages each of the M input rows and reuses each loaded W row across them —
+// the per-(m,n) reduction (lane-strided over K, warp shfl-xor tree) is
+// identical to the single-row kernel, so results are bit-for-bit the same.
+// K must be a multiple of 8. bf16 output.
+void launch_gemm_bf16(const void* X, const void* W, void* Y, int M, int N, int K,
+                      cudaStream_t stream);
+
+// Same as launch_gemm_bf16 but writes fp32 output (LM-head logits when the
+// shared lm_head is unquantized bf16).
+void launch_gemm_f32(const void* X, const void* W, float* Y, int M, int N, int K,
+                     cudaStream_t stream);
+
 } // namespace dflash_kernels
 } // namespace sparkinfer
